@@ -1,0 +1,39 @@
+# Secrets and local config
+.env
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Generated outputs
+*.docx
+*_transcript.docx
+*_transcripts.docx
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cursor / local tooling
+.cursor/
+agent-tools/
+
+# Temporary files
+*.tmp
+*.log
+.cache/
