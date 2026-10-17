@@ -161,6 +161,40 @@ youtube-transcript-tool/
 
 Long technical YouTube courses are easier to archive, search, study, and process when playlists are converted into structured, portable documents. This tool automates that workflow without downloading video files.
 
+## Phase 1: Daily video discovery (in progress)
+
+Discover new uploads on [@aiDotEngineer](https://www.youtube.com/@aiDotEngineer/videos) using the **YouTube Data API v3** (official uploads playlist + `videos.list` for authoritative `publishedAt`).
+
+```bash
+pip install -r requirements-dev.txt
+cp .env.example .env   # add YOUTUBE_API_KEY
+
+python discover.py --dry-run
+python discover.py --lookback-hours 24 --recovery-lookback-days 7
+python discover.py --video-id VIDEO_ID --dry-run
+```
+
+Output is JSON on stdout (window boundaries + discovery records). No email, archive, or scheduling in Phase 1.
+
+Run tests: `pytest`
+
+## Daily digest MVP (vertical slice)
+
+End-to-end path: discovery → transcript → summary → archive → email preview.
+
+```bash
+# One public video (works without YOUTUBE_API_KEY; uses yt-dlp metadata)
+python run_daily.py --dry-run --mock-llm --force --video-id VIDEO_ID
+
+# Real OpenAI summaries (requires OPENAI_API_KEY)
+python run_daily.py --dry-run --video-id VIDEO_ID --force
+
+# Send email when SMTP env vars are set
+python run_daily.py --send-email --force --video-id VIDEO_ID
+```
+
+Artifacts under `ARCHIVE_ROOT` (default `./archive`, gitignored). GitHub Actions: `.github/workflows/daily-youtube-digest.yml` (`workflow_dispatch` only until you uncomment the 7 AM schedule).
+
 ## Future improvements
 
 - Markdown or PDF export

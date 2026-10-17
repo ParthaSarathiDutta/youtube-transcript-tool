@@ -18,6 +18,7 @@ dist/
 .eggs/
 
 # Generated outputs
+archive/
 *.docx
 *_transcript.docx
 *_transcripts.docx
