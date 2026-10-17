@@ -19,10 +19,12 @@ from pipeline.archive_store import (
     digest_day_paths,
     load_hydrated_video,
     load_index,
+    mark_videos_digest_emailed,
     maybe_push_to_github_archive,
     save_index,
     sync_archive_from_github,
     video_already_processed,
+    video_digest_email_sent,
     write_daily_bundle,
     write_video_artifacts,
 )
@@ -82,35 +84,14 @@ def run_daily_digest(
     }
     if paths["manifest"].exists() and not force:
         manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
-        if (
-            manifest.get("email_status") in ("sent", "sent_archive_push_failed")
-            and not dry_run
-            and not force
-        ):
-            detail = "Digest already sent"
-            if manifest.get("email_status") == "sent_archive_push_failed":
-                detail += " (archive push failed last run; do not resend—fix archive—see DEPLOYMENT.md)"
-            else:
-                detail += "; use --force to resend"
-            return PipelineRunResult(
-                digest_date=digest_date,
-                archive_dir=str(paths["day_dir"]),
-                videos_processed=0,
-                videos_failed=[],
-                email_status="skipped",
-                email_detail=detail,
-                llm_mocked=mock_llm,
-                archive_push=None,
-                archive_pull=archive_pull,
-                discovery_count=0,
-            )
 
     records = _discover(config, video_id=video_id, video_ids=video_ids)
     records = _records_for_daily_digest(
         records, explicit=bool(video_id or video_ids)
     )
-    doc_items: list[DailyVideoDocument] = []
-    summary_sections: list[str] = []
+    email_doc_items: list[DailyVideoDocument] = []
+    email_sections: list[str] = []
+    new_transcripts_count = 0
     videos_failed: list[str] = []
     summaries_enabled = config.enable_summaries
     manifest["summaries_enabled"] = summaries_enabled
@@ -124,13 +105,15 @@ def run_daily_digest(
 
     for record in records:
         if not force and video_already_processed(index, record.video_id):
+            include_in_email = not video_digest_email_sent(index, record.video_id)
             _hydrate_video_artifacts(
                 paths["videos_dir"],
                 record.video_id,
-                doc_items,
-                summary_sections,
+                email_doc_items,
+                email_sections,
                 manifest,
                 hydrated_ids,
+                include_in_email=include_in_email,
             )
             continue
         if record.status.value not in ("discovered",):
@@ -186,7 +169,7 @@ def run_daily_digest(
         manifest["videos"].append(entry.__dict__)
         _update_index(index, record, transcript, success=True)
 
-        doc_items.append(
+        email_doc_items.append(
             DailyVideoDocument(
                 video_id=record.video_id,
                 title=record.title,
@@ -195,7 +178,7 @@ def run_daily_digest(
                 transcript=transcript,
             )
         )
-        summary_sections.append(
+        email_sections.append(
             _format_email_video_section(
                 record,
                 transcript.provider,
@@ -204,16 +187,13 @@ def run_daily_digest(
             )
         )
         hydrated_ids.add(record.video_id)
-
-    _hydrate_manifest_videos_on_disk(
-        paths["videos_dir"], manifest, doc_items, summary_sections, hydrated_ids
-    )
+        new_transcripts_count += 1
 
     digest_title = f"AI Engineer Daily Transcripts — {digest_date.isoformat()}"
     daily_summary_md = _build_daily_summary_md(
         digest_date,
         records,
-        summary_sections,
+        email_sections,
         videos_failed,
         summaries_enabled=summaries_enabled,
     )
@@ -222,7 +202,7 @@ def run_daily_digest(
         digest_date=digest_date,
         digest_title=digest_title,
         daily_summary_md=daily_summary_md,
-        doc_items=doc_items,
+        doc_items=email_doc_items,
         manifest=manifest,
     )
     save_index(config.archive_root, index)
@@ -230,10 +210,11 @@ def run_daily_digest(
     archive_push = _push_archive_if_configured(config, dry_run=dry_run)
 
     email_status = "skipped"
-    email_detail = "Zero videos and no archive attachment."
-    has_attachment = paths["combined_docx"].exists()
-    should_email = bool(doc_items) or has_attachment or config.send_email_on_zero_videos
+    email_detail = "No new videos for digest email."
+    has_attachment = paths["combined_docx"].exists() and bool(email_doc_items)
+    should_email = bool(email_doc_items) or config.send_email_on_zero_videos
     if should_email:
+        summary_sections = list(email_sections)
         if not summary_sections and paths["daily_summary"].exists():
             summary_sections = [paths["daily_summary"].read_text(encoding="utf-8")]
         subject = f"AI Engineer Daily Digest — {digest_date.strftime('%B %d, %Y')}"
@@ -255,8 +236,15 @@ def run_daily_digest(
         email_status = email_result.status
         email_detail = email_result.detail
         if email_status == "sent":
+            mark_videos_digest_emailed(
+                index, [item.video_id for item in email_doc_items]
+            )
+            save_index(config.archive_root, index)
             manifest["email_status"] = "sent"
             manifest["email_sent_at_utc"] = datetime.now(timezone.utc).isoformat()
+            manifest["last_emailed_video_ids"] = [
+                item.video_id for item in email_doc_items
+            ]
         else:
             manifest["email_status"] = email_status
         manifest["email_detail"] = email_detail
@@ -284,7 +272,7 @@ def run_daily_digest(
     return PipelineRunResult(
         digest_date=digest_date,
         archive_dir=str(paths["day_dir"]),
-        videos_processed=len(doc_items),
+        videos_processed=len(email_doc_items) or new_transcripts_count,
         videos_failed=videos_failed,
         email_status=email_status,
         email_detail=email_detail,
@@ -312,39 +300,19 @@ def _hydrate_video_artifacts(
     summary_sections: list[str],
     manifest: dict[str, Any],
     hydrated_ids: set[str],
+    *,
+    include_in_email: bool,
 ) -> None:
     if video_id in hydrated_ids:
         return
     hydrated = load_hydrated_video(videos_dir, video_id)
     if not hydrated:
         return
-    doc_items.append(hydrated.doc_item)
-    summary_sections.append(hydrated.email_section)
+    if include_in_email:
+        doc_items.append(hydrated.doc_item)
+        summary_sections.append(hydrated.email_section)
     _upsert_manifest_video(manifest, hydrated.manifest_entry)
     hydrated_ids.add(video_id)
-
-
-def _hydrate_manifest_videos_on_disk(
-    videos_dir: Path,
-    manifest: dict[str, Any],
-    doc_items: list[DailyVideoDocument],
-    summary_sections: list[str],
-    hydrated_ids: set[str],
-) -> None:
-    for entry in manifest.get("videos") or []:
-        if not isinstance(entry, dict):
-            continue
-        video_id = entry.get("video_id")
-        if not video_id or not isinstance(video_id, str):
-            continue
-        _hydrate_video_artifacts(
-            videos_dir,
-            video_id,
-            doc_items,
-            summary_sections,
-            manifest,
-            hydrated_ids,
-        )
 
 
 def _upsert_manifest_video(manifest: dict[str, Any], entry: dict[str, Any]) -> None:
