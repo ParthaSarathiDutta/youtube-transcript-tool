@@ -27,10 +27,18 @@ def sanitize_git_message(text: str) -> str:
     return redacted.strip()[:500]
 
 
+_ARCHIVE_GIT_NAME = "youtube-transcript-tool"
+_ARCHIVE_GIT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
+
+
 def _git_env(token: str | None) -> dict[str, str]:
     """Auth via GIT_CONFIG_* env vars so the token is not passed on the argv."""
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_AUTHOR_NAME"] = _ARCHIVE_GIT_NAME
+    env["GIT_AUTHOR_EMAIL"] = _ARCHIVE_GIT_EMAIL
+    env["GIT_COMMITTER_NAME"] = _ARCHIVE_GIT_NAME
+    env["GIT_COMMITTER_EMAIL"] = _ARCHIVE_GIT_EMAIL
     if token:
         # GitHub HTTPS git expects Basic auth (x-access-token:PAT), not Bearer.
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
@@ -38,6 +46,11 @@ def _git_env(token: str | None) -> dict[str, str]:
         env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraHeader"
         env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: basic {basic}"
     return env
+
+
+def archive_git_env(token: str | None) -> dict[str, str]:
+    """Git environment for archive repo operations (auth + commit identity)."""
+    return _git_env(token)
 
 
 def _run_git(

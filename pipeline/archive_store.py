@@ -17,6 +17,7 @@ from pipeline.git_archive import (
     copy_remote_tree_into_archive,
     push_archive_repo,
     sanitize_git_message,
+    archive_git_env,
 )
 from transcript_service import TranscriptResult
 
@@ -241,15 +242,18 @@ def maybe_push_to_github_archive(
                 shutil.copytree(item, dest)
             else:
                 shutil.copy2(item, dest)
+        git_env = archive_git_env(token)
         subprocess.run(
             ["git", "add", "-A"],
             cwd=work_dir,
+            env=git_env,
             capture_output=True,
             check=True,
         )
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=work_dir,
+            env=git_env,
             capture_output=True,
             text=True,
             check=True,
@@ -260,6 +264,7 @@ def maybe_push_to_github_archive(
         subprocess.run(
             ["git", "commit", "-m", msg],
             cwd=work_dir,
+            env=git_env,
             capture_output=True,
             check=True,
         )
