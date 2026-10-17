@@ -45,6 +45,7 @@ jobs:
       - name: Transcript smoke (GitHub runner)
         env:
           VIDEO_ID: ${{ github.event.inputs.video_id }}
+          TRANSCRIPT_API_KEY: ${{ secrets.TRANSCRIPT_API_KEY }}
         run: |
           export VID="${VIDEO_ID:-BOWYujhIQuo}"
           python - <<'PY'
@@ -60,6 +61,7 @@ jobs:
 
       - name: Run daily pipeline
         env:
+          TRANSCRIPT_API_KEY: ${{ secrets.TRANSCRIPT_API_KEY }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
