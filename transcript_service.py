@@ -218,17 +218,31 @@ def _ytdlp_subtitle_opts(use_browser_cookies: bool) -> dict:
     return opts
 
 
+def _browser_cookie_subtitles_enabled() -> bool:
+    """GitHub-hosted runners have no Chrome profile; skip cookiesfrombrowser there."""
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        return False
+    if os.environ.get("TRANSCRIPT_SKIP_BROWSER_COOKIES", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return False
+    return True
+
+
 def _fetch_via_ytdlp_subtitles(
     video_id: str,
     preferred_languages: list[str],
 ) -> TranscriptResult | None:
     """Download English subtitles with yt-dlp (no video/audio download)."""
-    for use_browser_cookies in (True, False):
+    cookie_attempts = (True, False) if _browser_cookie_subtitles_enabled() else (False,)
+    for use_browser_cookies in cookie_attempts:
         result = _fetch_via_ytdlp_subtitles_once(
             video_id, preferred_languages, use_browser_cookies=use_browser_cookies
         )
         if result:
-            return result
+            return _apply_provider(result, "yt-dlp")
     return None
 
 
