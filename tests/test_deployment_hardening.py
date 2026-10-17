@@ -118,6 +118,7 @@ def test_email_retry_hydrates_without_reprocessing_transcript(tmp_path: Path):
         discovery_lookback_hours=24,
         discovery_recovery_days=7,
         send_email_on_zero_videos=False,
+        enable_summaries=False,
     )
     now = datetime.now(timezone.utc)
     record = DiscoveryRecord(
