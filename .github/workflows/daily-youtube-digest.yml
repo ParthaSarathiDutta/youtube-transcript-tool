@@ -46,12 +46,13 @@ jobs:
         env:
           VIDEO_ID: ${{ github.event.inputs.video_id }}
         run: |
-          VID="${VIDEO_ID:-BOWYujhIQuo}"
+          export VID="${VIDEO_ID:-BOWYujhIQuo}"
           python - <<'PY'
           import os
           from transcript_service import fetch_transcript
-          vid = os.environ.get("VID", "BOWYujhIQuo")
+          vid = os.environ["VID"]
           result = fetch_transcript(vid)
+          print("video_id", vid)
           print("available", result.available, "provider", result.provider)
           if not result.available or len(result.display_text) < 100:
               raise SystemExit("Transcript smoke failed on runner")
@@ -72,11 +73,10 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
-          ARGS="--mock-llm"
           if [ "${{ github.event.inputs.dry_run || 'true' }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+            ARGS="--dry-run"
           else
-            ARGS="$ARGS --send-email"
+            ARGS="--send-email"
           fi
           if [ -n "${{ github.event.inputs.video_id }}" ]; then
             ARGS="$ARGS --video-id ${{ github.event.inputs.video_id }}"
