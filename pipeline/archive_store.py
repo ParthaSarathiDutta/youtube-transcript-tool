@@ -72,6 +72,20 @@ def video_already_processed(index: dict[str, Any], video_id: str) -> bool:
     return entry.get("transcript_status") == "success"
 
 
+def video_digest_email_sent(index: dict[str, Any], video_id: str) -> bool:
+    entry = (index.get("videos") or {}).get(video_id) or {}
+    return bool(entry.get("digest_email_sent"))
+
+
+def mark_videos_digest_emailed(index: dict[str, Any], video_ids: list[str]) -> None:
+    videos = index.setdefault("videos", {})
+    stamped = datetime.now(timezone.utc).isoformat()
+    for video_id in video_ids:
+        entry = videos.setdefault(video_id, {})
+        entry["digest_email_sent"] = True
+        entry["digest_email_sent_at_utc"] = stamped
+
+
 def sync_archive_from_github(
     *,
     archive_root: Path,

@@ -11,10 +11,10 @@ on:
         description: "Optional single video ID for smoke testing"
         required: false
         default: ""
+  # Uncomment the block below when merging to activate daily 7:00 AM America/Chicago.
   # schedule:
   #   - cron: "0 7 * * *"
   #     timezone: America/Chicago
-  # Enable after transcript smoke on ubuntu-latest and operator approval.
 
 concurrency:
   group: daily-youtube-digest
@@ -76,7 +76,9 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
-          if [ "${{ github.event.inputs.dry_run || 'true' }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            ARGS="--send-email"
+          elif [ "${{ github.event.inputs.dry_run || 'true' }}" = "true" ]; then
             ARGS="--dry-run"
           else
             ARGS="--send-email"
