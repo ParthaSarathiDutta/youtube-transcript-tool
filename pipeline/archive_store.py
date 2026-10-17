@@ -139,11 +139,13 @@ def load_hydrated_video(videos_dir: Path, video_id: str) -> HydratedVideo | None
         published_at_utc=published_at,
         transcript=transcript,
     )
-    email_section = (
-        f"VIDEO: {title}\n"
-        f"YouTube: {url}\n"
-        f"Transcript provider: {transcript.provider or 'unknown'}\n\n"
-        f"{summary_md}\n"
+    summary_enabled = metadata.get("summary_enabled", True)
+    email_section = _email_section_text(
+        title=title,
+        url=url,
+        provider=transcript.provider,
+        summary_md=summary_md,
+        summary_enabled=bool(summary_enabled),
     )
     manifest_entry = {
         "video_id": video_id,
@@ -164,6 +166,24 @@ def load_hydrated_video(videos_dir: Path, video_id: str) -> HydratedVideo | None
     )
 
 
+def _email_section_text(
+    *,
+    title: str,
+    url: str,
+    provider: str | None,
+    summary_md: str,
+    summary_enabled: bool,
+) -> str:
+    lines = [
+        f"VIDEO: {title}",
+        f"YouTube: {url}",
+        f"Transcript provider: {provider or 'unknown'}",
+    ]
+    if summary_enabled and summary_md.strip():
+        lines.extend(["", summary_md.strip()])
+    return "\n".join(lines) + "\n"
+
+
 def _transcript_display_text(transcript_md: str) -> str:
     parts = transcript_md.split("\n\n", 2)
     if len(parts) >= 3 and parts[1].startswith("URL:"):
@@ -179,7 +199,7 @@ def write_video_artifacts(
     video_id: str,
     metadata: dict[str, Any],
     transcript_md: str,
-    summary_md: str,
+    summary_md: str | None = None,
 ) -> VideoArchiveEntry:
     video_dir = videos_dir / video_id
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +207,10 @@ def write_video_artifacts(
     summary_path = video_dir / "summary.md"
     metadata_path = video_dir / "metadata.json"
     transcript_path.write_text(transcript_md, encoding="utf-8")
-    summary_path.write_text(summary_md, encoding="utf-8")
+    summary_path_str: str | None = None
+    if summary_md is not None:
+        summary_path.write_text(summary_md, encoding="utf-8")
+        summary_path_str = str(summary_path)
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return VideoArchiveEntry(
         video_id=video_id,
@@ -197,7 +220,7 @@ def write_video_artifacts(
         discovery_category=metadata.get("discovery_category", ""),
         transcript_status=metadata.get("transcript_status", "unknown"),
         transcript_provider=metadata.get("transcript_provider"),
-        summary_path=str(summary_path),
+        summary_path=summary_path_str,
         transcript_path=str(transcript_path),
         metadata_path=str(metadata_path),
     )

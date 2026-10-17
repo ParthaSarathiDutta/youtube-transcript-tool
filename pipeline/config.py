@@ -27,6 +27,14 @@ class PipelineConfig:
     discovery_lookback_hours: float
     discovery_recovery_days: int
     send_email_on_zero_videos: bool
+    enable_summaries: bool
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def load_config() -> PipelineConfig:
@@ -35,7 +43,7 @@ def load_config() -> PipelineConfig:
         youtube_api_key=os.environ.get("YOUTUBE_API_KEY", "").strip() or None,
         youtube_channel_handle=os.environ.get("YOUTUBE_CHANNEL_HANDLE", "aiDotEngineer"),
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip() or None,
-        openai_model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        openai_model=os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o-mini",
         archive_root=Path(os.environ.get("ARCHIVE_ROOT", "archive")).resolve(),
         archive_github_repo=os.environ.get("ARCHIVE_GITHUB_REPO", "").strip() or None,
         archive_github_token=os.environ.get("ARCHIVE_GITHUB_TOKEN", "").strip() or None,
@@ -49,4 +57,5 @@ def load_config() -> PipelineConfig:
         discovery_recovery_days=int(os.environ.get("DISCOVERY_RECOVERY_LOOKBACK_DAYS", "7")),
         send_email_on_zero_videos=os.environ.get("SEND_EMAIL_ON_ZERO_VIDEOS", "false").lower()
         == "true",
+        enable_summaries=_env_bool("ENABLE_SUMMARIES", default=False),
     )

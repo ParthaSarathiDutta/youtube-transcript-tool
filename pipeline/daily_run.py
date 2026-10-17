@@ -15,6 +15,7 @@ from discovery.window import CHICAGO, REPORTING_WINDOW_POLICY
 from discovery.youtube_data_api import YouTubeDataApiClient
 from document_writer import DailyVideoDocument
 from pipeline.archive_store import (
+    _email_section_text,
     digest_day_paths,
     load_hydrated_video,
     load_index,
@@ -111,7 +112,13 @@ def run_daily_digest(
     doc_items: list[DailyVideoDocument] = []
     summary_sections: list[str] = []
     videos_failed: list[str] = []
-    llm_mocked = mock_llm or not config.openai_api_key
+    summaries_enabled = config.enable_summaries
+    manifest["summaries_enabled"] = summaries_enabled
+    llm_mocked = (
+        not summaries_enabled
+        or mock_llm
+        or not config.openai_api_key
+    )
 
     hydrated_ids: set[str] = set()
 
@@ -136,14 +143,18 @@ def run_daily_digest(
             _update_index(index, record, transcript, success=False)
             continue
 
-        summary = summarize_transcript(
-            title=record.title,
-            youtube_url=record.youtube_url,
-            transcript_text=transcript.display_text,
-            api_key=config.openai_api_key,
-            model=config.openai_model,
-            mock=mock_llm or not config.openai_api_key,
-        )
+        summary: SummaryResult | None = None
+        summary_md: str | None = None
+        if summaries_enabled:
+            summary = summarize_transcript(
+                title=record.title,
+                youtube_url=record.youtube_url,
+                transcript_text=transcript.display_text,
+                api_key=config.openai_api_key,
+                model=config.openai_model,
+                mock=mock_llm or not config.openai_api_key,
+            )
+            summary_md = summary.markdown
 
         metadata = {
             "video_id": record.video_id,
@@ -155,9 +166,11 @@ def run_daily_digest(
             "transcript_provider": transcript.provider,
             "caption_language": transcript.language_code,
             "captions_generated": transcript.is_generated,
-            "summary_model": summary.model,
-            "summary_mocked": summary.mocked,
+            "summary_enabled": summaries_enabled,
         }
+        if summary is not None:
+            metadata["summary_model"] = summary.model
+            metadata["summary_mocked"] = summary.mocked
         transcript_md = (
             f"# {record.title}\n\n"
             f"URL: {record.youtube_url}\n\n"
@@ -168,7 +181,7 @@ def run_daily_digest(
             video_id=record.video_id,
             metadata=metadata,
             transcript_md=transcript_md,
-            summary_md=summary.markdown,
+            summary_md=summary_md,
         )
         manifest["videos"].append(entry.__dict__)
         _update_index(index, record, transcript, success=True)
@@ -183,7 +196,12 @@ def run_daily_digest(
             )
         )
         summary_sections.append(
-            _format_email_video_section(record, summary, transcript.provider)
+            _format_email_video_section(
+                record,
+                transcript.provider,
+                summary.markdown if summary else None,
+                summaries_enabled=summaries_enabled,
+            )
         )
         hydrated_ids.add(record.video_id)
 
@@ -193,7 +211,11 @@ def run_daily_digest(
 
     digest_title = f"AI Engineer Daily Transcripts — {digest_date.isoformat()}"
     daily_summary_md = _build_daily_summary_md(
-        digest_date, records, summary_sections, videos_failed
+        digest_date,
+        records,
+        summary_sections,
+        videos_failed,
+        summaries_enabled=summaries_enabled,
     )
     write_daily_bundle(
         archive_root=config.archive_root,
@@ -429,14 +451,17 @@ def _update_index(
 
 def _format_email_video_section(
     record: DiscoveryRecord,
-    summary: SummaryResult,
     provider: str | None,
+    summary_markdown: str | None,
+    *,
+    summaries_enabled: bool,
 ) -> str:
-    return (
-        f"VIDEO: {record.title}\n"
-        f"YouTube: {record.youtube_url}\n"
-        f"Transcript provider: {provider or 'unknown'}\n\n"
-        f"{summary.markdown}\n"
+    return _email_section_text(
+        title=record.title,
+        url=record.youtube_url,
+        provider=provider,
+        summary_md=summary_markdown or "",
+        summary_enabled=summaries_enabled,
     )
 
 
@@ -445,12 +470,20 @@ def _build_daily_summary_md(
     records: list[DiscoveryRecord],
     summary_sections: list[str],
     failures: list[str],
+    *,
+    summaries_enabled: bool,
 ) -> str:
+    title = (
+        "AI Engineer Daily Summary"
+        if summaries_enabled
+        else "AI Engineer Daily Transcripts"
+    )
     lines = [
-        f"# AI Engineer Daily Summary — {digest_date.isoformat()}",
+        f"# {title} — {digest_date.isoformat()}",
         "",
         f"Discovered: {len(records)}",
-        f"Summarized: {len(summary_sections)}",
+        f"Processed: {len(summary_sections)}",
+        f"OpenAI summaries: {'enabled' if summaries_enabled else 'disabled'}",
         "",
     ]
     if failures:

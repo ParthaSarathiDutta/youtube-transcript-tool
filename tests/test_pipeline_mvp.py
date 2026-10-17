@@ -17,7 +17,7 @@ from discovery.models import (
 )
 from document_writer import DailyVideoDocument, write_daily_combined_document
 from pipeline.archive_store import load_index, save_index, video_already_processed
-from pipeline.config import PipelineConfig
+from pipeline.config import PipelineConfig, load_config
 from pipeline.daily_run import run_daily_digest
 from pipeline.email_delivery import send_digest_email
 from pipeline.summarizer import parse_video_title_metadata, summarize_transcript
@@ -37,6 +37,12 @@ def _record(video_id: str = "testvideo001") -> DiscoveryRecord:
         status=DiscoveryStatus.DISCOVERED,
         discovery_category=DiscoveryCategory.MANUAL_VIDEO_ID,
     )
+
+
+def test_enable_summaries_defaults_false(monkeypatch):
+    monkeypatch.delenv("ENABLE_SUMMARIES", raising=False)
+    cfg = load_config()
+    assert cfg.enable_summaries is False
 
 
 def test_parse_video_title_metadata():
@@ -107,6 +113,59 @@ def test_duplicate_processing_skips_indexed_video(tmp_path: Path):
     assert video_already_processed(loaded, "dup12345678") is True
 
 
+def test_pipeline_transcript_only_without_openai(tmp_path: Path):
+    config = PipelineConfig(
+        youtube_api_key=None,
+        youtube_channel_handle="aiDotEngineer",
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
+        archive_root=tmp_path / "archive",
+        archive_github_repo=None,
+        archive_github_token=None,
+        email_smtp_host=None,
+        email_smtp_port=587,
+        email_smtp_user=None,
+        email_smtp_password=None,
+        email_from=None,
+        email_to=None,
+        discovery_lookback_hours=24,
+        discovery_recovery_days=7,
+        send_email_on_zero_videos=False,
+        enable_summaries=False,
+    )
+    transcript = TranscriptResult(
+        segments=[],
+        language_code="en",
+        is_generated=False,
+        display_text="Full transcript body for archive and docx.",
+        available=True,
+        provider="youtube_transcript_api",
+    )
+
+    with patch("pipeline.daily_run._discover", return_value=[_record()]):
+        with patch("pipeline.daily_run.fetch_transcript", return_value=transcript):
+            with patch("pipeline.daily_run.summarize_transcript") as summarize_mock:
+                result = run_daily_digest(
+                    config,
+                    dry_run=True,
+                    force=True,
+                    video_id="testvideo001",
+                )
+                summarize_mock.assert_not_called()
+
+    assert result.videos_processed == 1
+    assert result.llm_mocked is True
+    day_dir = Path(result.archive_dir)
+    video_dir = day_dir / "videos" / "testvideo001"
+    assert (video_dir / "transcript.md").exists()
+    assert not (video_dir / "summary.md").exists()
+    preview = (day_dir / "email-preview.txt").read_text(encoding="utf-8")
+    assert "Test Video" in preview
+    assert "youtube.com" in preview
+    assert "Main concept" not in preview
+    assert (day_dir / "transcripts-combined.docx").exists()
+
+
 def test_pipeline_vertical_slice_with_mocks(tmp_path: Path):
     config = PipelineConfig(
         youtube_api_key=None,
@@ -125,6 +184,7 @@ def test_pipeline_vertical_slice_with_mocks(tmp_path: Path):
         discovery_lookback_hours=24,
         discovery_recovery_days=7,
         send_email_on_zero_videos=False,
+        enable_summaries=True,
     )
     transcript = TranscriptResult(
         segments=[],
