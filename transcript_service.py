@@ -47,6 +47,7 @@ class TranscriptResult:
     display_text: str
     available: bool = True
     error_message: str | None = None
+    provider: str | None = None
 
     @classmethod
     def unavailable(cls, message: str = "Transcript unavailable.") -> TranscriptResult:
@@ -190,6 +191,8 @@ def _result_from_segments(
     segments: list[TranscriptSegment],
     language_code: str,
     is_generated: bool,
+    *,
+    provider: str | None = None,
 ) -> TranscriptResult | None:
     display_text = segments_to_paragraphs(segments)
     if not display_text.strip():
@@ -200,6 +203,7 @@ def _result_from_segments(
         is_generated=is_generated,
         display_text=display_text,
         available=True,
+        provider=provider,
     )
 
 
@@ -418,9 +422,21 @@ def _fetch_via_transcript_api(
         TranscriptSegment(start=s.start, duration=s.duration, text=s.text)
         for s in fetched.snippets
     ]
-    result = _result_from_segments(segments, fetched.language_code, fetched.is_generated)
+    result = _result_from_segments(
+        segments,
+        fetched.language_code,
+        fetched.is_generated,
+        provider="youtube_transcript_api",
+    )
     if not result:
         return TranscriptResult.unavailable()
+    return result
+
+
+def _apply_provider(result: TranscriptResult | None, provider: str) -> TranscriptResult | None:
+    if result is None or not result.available:
+        return result
+    result.provider = provider
     return result
 
 
@@ -431,21 +447,29 @@ def fetch_transcript(video_id: str, preferred_languages: list[str] | None = None
     Falls back to yt-dlp subtitles, then TranscriptAPI, when earlier methods fail.
     """
     languages = preferred_languages or ["en", "en-US", "en-GB"]
+    failures: list[str] = []
 
     try:
         return _fetch_via_transcript_api(video_id, languages)
-    except (IpBlocked, RequestBlocked):
-        fallback = _fetch_via_ytdlp_subtitles(video_id, languages)
-        if fallback:
-            return fallback
-        transcriptapi = _fetch_via_transcriptapi(video_id, languages)
-        if transcriptapi:
-            return transcriptapi
-        return TranscriptResult.unavailable()
-    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, CouldNotRetrieveTranscript):
-        return TranscriptResult.unavailable()
-    except Exception:
-        return TranscriptResult.unavailable()
+    except (IpBlocked, RequestBlocked) as exc:
+        failures.append(f"youtube_transcript_api:{exc.__class__.__name__}")
+    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, CouldNotRetrieveTranscript) as exc:
+        failures.append(f"youtube_transcript_api:{exc.__class__.__name__}")
+    except Exception as exc:
+        failures.append(f"youtube_transcript_api:{exc.__class__.__name__}")
+
+    fallback = _apply_provider(_fetch_via_ytdlp_subtitles(video_id, languages), "yt-dlp")
+    if fallback:
+        return fallback
+    failures.append("yt-dlp:no_result")
+
+    transcriptapi = _apply_provider(_fetch_via_transcriptapi(video_id, languages), "transcriptapi")
+    if transcriptapi:
+        return transcriptapi
+    failures.append("transcriptapi:no_result")
+
+    message = "Transcript unavailable. Attempts: " + "; ".join(failures)
+    return TranscriptResult.unavailable(message)
 
 
 def segments_with_timestamps(segments: list[TranscriptSegment]) -> str:

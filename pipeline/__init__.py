@@ -1,0 +1,1 @@
+"""Daily digest pipeline orchestration."""
