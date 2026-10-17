@@ -20,7 +20,7 @@ from pipeline.archive_store import load_index, save_index, video_already_process
 from pipeline.config import PipelineConfig
 from pipeline.daily_run import run_daily_digest
 from pipeline.email_delivery import send_digest_email
-from pipeline.summarizer import summarize_transcript
+from pipeline.summarizer import parse_video_title_metadata, summarize_transcript
 from transcript_service import TranscriptResult
 
 
@@ -37,6 +37,14 @@ def _record(video_id: str = "testvideo001") -> DiscoveryRecord:
         status=DiscoveryStatus.DISCOVERED,
         discovery_category=DiscoveryCategory.MANUAL_VIDEO_ID,
     )
+
+
+def test_parse_video_title_metadata():
+    meta = parse_video_title_metadata(
+        "The AI Bill Is Too Damn High: Tokenomics 101 — Eugene Cheah, Featherless AI"
+    )
+    assert meta.speaker == "Eugene Cheah"
+    assert meta.organization == "Featherless AI"
 
 
 def test_mocked_openai_summarization():
