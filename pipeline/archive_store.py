@@ -70,8 +70,36 @@ def save_index(archive_root: Path, index: dict[str, Any]) -> None:
 
 
 def video_already_processed(index: dict[str, Any], video_id: str) -> bool:
+    """True when any archive path recorded a successful transcript (playlist or daily)."""
     entry = (index.get("videos") or {}).get(video_id) or {}
-    return entry.get("transcript_status") == "success"
+    if entry.get("transcript_status") == "success":
+        return True
+    return entry.get("evals_playlist_transcript_status") == "success"
+
+
+def video_archived_for_daily_digest(
+    index: dict[str, Any],
+    video_id: str,
+    *,
+    archive_root: Path | None = None,
+) -> bool:
+    """True only when a transcript exists under the dated daily archive (not playlist-only)."""
+    entry = (index.get("videos") or {}).get(video_id) or {}
+    if entry.get("transcript_scope") == "evals_playlist":
+        return False
+    if archive_root is not None:
+        from pipeline.evals_playlist_sync import evals_root, locate_global_transcript_dir
+
+        daily_dir = locate_global_transcript_dir(
+            archive_root,
+            video_id,
+            index,
+            exclude_prefix=evals_root(archive_root),
+        )
+        return daily_dir is not None
+    if entry.get("transcript_status") != "success":
+        return False
+    return entry.get("transcript_scope", "daily_digest") == "daily_digest"
 
 
 def video_digest_email_sent(index: dict[str, Any], video_id: str) -> bool:

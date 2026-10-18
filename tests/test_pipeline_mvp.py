@@ -107,6 +107,73 @@ def test_mocked_email_preview(tmp_path: Path):
     assert (tmp_path / "email-preview.txt").exists()
 
 
+def test_playlist_only_transcript_does_not_skip_daily_digest(tmp_path: Path):
+    """Regression: evals playlist success must not block daily email/archive processing."""
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    video_id = "eligvid1234"
+    evals_dir = archive_root / "responsiv/evals" / f"Talk__{video_id}"
+    evals_dir.mkdir(parents=True)
+    (evals_dir / "transcript.md").write_text(
+        "# Talk\n\nURL: https://youtu.be/x\n\nplaylist-only body",
+        encoding="utf-8",
+    )
+    save_index(
+        archive_root,
+        {
+            "videos": {
+                video_id: {
+                    "transcript_status": "success",
+                    "evals_playlist_transcript_status": "success",
+                }
+            }
+        },
+    )
+    config = PipelineConfig(
+        youtube_api_key=None,
+        youtube_channel_handle="aiDotEngineer",
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
+        archive_root=archive_root,
+        archive_github_repo=None,
+        archive_github_token=None,
+        email_smtp_host=None,
+        email_smtp_port=587,
+        email_smtp_user=None,
+        email_smtp_password=None,
+        email_from=None,
+        email_to=None,
+        discovery_lookback_hours=24,
+        discovery_recovery_days=7,
+        send_email_on_zero_videos=False,
+        enable_summaries=False,
+    )
+    transcript = TranscriptResult(
+        segments=[],
+        language_code="en",
+        is_generated=False,
+        display_text="Daily pipeline transcript body for archive.",
+        available=True,
+        provider="youtube_transcript_api",
+    )
+    record = _record(video_id=video_id)
+
+    with patch("pipeline.daily_run._discover", return_value=[record]):
+        with patch("pipeline.daily_run.fetch_transcript", return_value=transcript) as fetch_mock:
+            result = run_daily_digest(
+                config,
+                dry_run=True,
+                video_id=video_id,
+            )
+            fetch_mock.assert_called_once_with(video_id)
+
+    assert result.videos_processed == 1
+    day_dir = Path(result.archive_dir)
+    daily_video_dir = resolve_video_dir(day_dir / "videos", video_id)
+    assert daily_video_dir is not None
+    assert (daily_video_dir / "transcript.md").exists()
+
+
 def test_duplicate_processing_skips_indexed_video(tmp_path: Path):
     index = {"videos": {"dup12345678": {"transcript_status": "success"}}}
     save_index(tmp_path, index)

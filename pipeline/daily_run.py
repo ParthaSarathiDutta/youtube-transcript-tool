@@ -14,7 +14,8 @@ from discovery.service import VideoDiscoveryService
 from discovery.window import CHICAGO, REPORTING_WINDOW_POLICY
 from discovery.youtube_data_api import YouTubeDataApiClient
 from document_writer import DailyVideoDocument
-from pipeline.archive_paths import build_video_folder_name, migrate_archive_video_folders
+from pipeline.archive_index import upsert_video_index_entry
+from pipeline.archive_paths import migrate_archive_video_folders
 from pipeline.archive_store import (
     _email_section_text,
     digest_day_paths,
@@ -24,7 +25,7 @@ from pipeline.archive_store import (
     maybe_push_to_github_archive,
     save_index,
     sync_archive_from_github,
-    video_already_processed,
+    video_archived_for_daily_digest,
     video_digest_email_sent,
     write_daily_bundle,
     write_video_artifacts,
@@ -107,7 +108,9 @@ def run_daily_digest(
     hydrated_ids: set[str] = set()
 
     for record in records:
-        if not force and video_already_processed(index, record.video_id):
+        if not force and video_archived_for_daily_digest(
+            index, record.video_id, archive_root=config.archive_root
+        ):
             include_in_email = not video_digest_email_sent(index, record.video_id)
             _hydrate_video_artifacts(
                 paths["videos_dir"],
@@ -415,15 +418,7 @@ def _update_index(
     *,
     success: bool,
 ) -> None:
-    videos = index.setdefault("videos", {})
-    videos[record.video_id] = {
-        "title": record.title,
-        "published_at_utc": record.published_at_utc.isoformat(),
-        "transcript_status": "success" if success else "failed",
-        "transcript_provider": transcript.provider,
-        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "archive_folder": build_video_folder_name(record.title, record.video_id),
-    }
+    upsert_video_index_entry(index, record, transcript, success=success)
 
 
 def _format_email_video_section(
