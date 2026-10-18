@@ -204,6 +204,56 @@ class YouTubeDataApiClient:
             if not page_token:
                 break
 
+    def get_playlist_title(self, playlist_id: str) -> str | None:
+        data = self._get(
+            "playlists",
+            {"part": "snippet", "id": playlist_id},
+        )
+        items = data.get("items") or []
+        if not items:
+            return None
+        snippet = items[0].get("snippet") or {}
+        return snippet.get("title") or playlist_id
+
+    def iter_playlist_video_entries(
+        self,
+        playlist_id: str,
+        *,
+        max_pages: int = 100,
+    ):
+        """
+        Yield (video_id, title) for every item in a playlist, following pagination.
+        """
+        page_token: str | None = None
+        pages = 0
+        while pages < max_pages:
+            pages += 1
+            params: dict[str, str | int] = {
+                "part": "snippet,contentDetails",
+                "playlistId": playlist_id,
+                "maxResults": 50,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            data = self._get("playlistItems", params)
+            items = data.get("items") or []
+            if not items:
+                break
+
+            for item in items:
+                content = item.get("contentDetails") or {}
+                video_id = content.get("videoId")
+                if not video_id:
+                    continue
+                snippet = item.get("snippet") or {}
+                title = snippet.get("title") or video_id
+                yield video_id, title
+
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+
     def get_videos_details(self, video_ids: list[str]) -> dict[str, ApiVideoDetails]:
         if not video_ids:
             return {}
