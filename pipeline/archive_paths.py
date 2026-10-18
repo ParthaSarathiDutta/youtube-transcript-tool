@@ -11,11 +11,12 @@ from pathlib import Path
 FOLDER_ID_SEPARATOR = "__"
 MAX_TITLE_SLUG_LEN = 80
 MAX_FOLDER_NAME_LEN = 120
+PROTECTED_ARTIFACTS = frozenset({"transcript.md", "summary.md", "metadata.json"})
 
 
 def slugify_title_for_folder(title: str) -> str:
     normalized = unicodedata.normalize("NFKD", title.strip())
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_text = normalized.encode("ascii", "ignore").decode("utf-8")
     cleaned = re.sub(r"[^\w\s-]", "", ascii_text)
     cleaned = re.sub(r"[\s_]+", "-", cleaned)
     cleaned = re.sub(r"-+", "-", cleaned).strip("-")
@@ -43,6 +44,19 @@ def parse_video_id_from_folder(folder_name: str) -> str | None:
     return folder_name or None
 
 
+def list_video_dirs(videos_dir: Path, video_id: str) -> list[Path]:
+    if not videos_dir.is_dir():
+        return []
+    return sorted(
+        (
+            child
+            for child in videos_dir.iterdir()
+            if child.is_dir() and _folder_matches_video_id(child.name, video_id)
+        ),
+        key=lambda path: path.name,
+    )
+
+
 def resolve_video_dir(
     videos_dir: Path,
     video_id: str,
@@ -55,19 +69,12 @@ def resolve_video_dir(
         hinted = videos_dir / folder_hint
         if hinted.is_dir() and _folder_matches_video_id(hinted.name, video_id):
             return hinted
-    legacy = videos_dir / video_id
-    if legacy.is_dir():
-        return legacy
-    suffix = f"{FOLDER_ID_SEPARATOR}{video_id}"
-    matches = [
-        child
-        for child in videos_dir.iterdir()
-        if child.is_dir() and _folder_matches_video_id(child.name, video_id)
-    ]
+    matches = list_video_dirs(videos_dir, video_id)
     if not matches:
         return None
     if len(matches) == 1:
         return matches[0]
+    suffix = f"{FOLDER_ID_SEPARATOR}{video_id}"
     for child in matches:
         if child.name.endswith(suffix):
             return child
@@ -85,55 +92,204 @@ def migrate_video_folder(
     video_id: str,
     title: str,
 ) -> str:
-    """Rename legacy id-only folder to title+id; skip if already migrated."""
+    """Consolidate all folders for video_id into one readable folder name."""
+    return consolidate_video_folders(
+        videos_dir, video_id=video_id, title=title
+    )
+
+
+def consolidate_video_folders(
+    videos_dir: Path,
+    *,
+    video_id: str,
+    title: str,
+) -> str:
+    if not videos_dir.is_dir():
+        videos_dir.mkdir(parents=True, exist_ok=True)
     target_name = build_video_folder_name(title, video_id)
-    target_dir = videos_dir / target_name
-    source_dir = resolve_video_dir(videos_dir, video_id)
-    if source_dir is None:
-        return target_name
-    if source_dir.name == target_name:
-        return target_name
-    if target_dir.exists():
-        if _same_video_dir(source_dir, target_dir):
-            if source_dir != target_dir:
-                shutil.rmtree(source_dir)
-        return target_name
-    source_dir.rename(target_dir)
-    return target_name
+    canonical = videos_dir / target_name
+    canonical.mkdir(parents=True, exist_ok=True)
+
+    for folder in list_video_dirs(videos_dir, video_id):
+        if folder.resolve() == canonical.resolve():
+            continue
+        merge_video_dir_into(canonical, folder)
+
+    remaining = list_video_dirs(videos_dir, video_id)
+    if len(remaining) != 1:
+        raise RuntimeError(
+            f"Expected one folder for {video_id}, found {len(remaining)}: "
+            f"{[path.name for path in remaining]}"
+        )
+    return remaining[0].name
 
 
-def _same_video_dir(left: Path, right: Path) -> bool:
-    left_transcript = left / "transcript.md"
-    right_transcript = right / "transcript.md"
-    if not left_transcript.exists() or not right_transcript.exists():
+def merge_video_dir_into(dest: Path, src: Path) -> None:
+    """Merge src into dest; preserve protected artifacts before removing src."""
+    if not src.is_dir():
+        return
+    if src.resolve() == dest.resolve():
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for item in sorted(src.iterdir(), key=lambda path: path.name):
+        if item.is_dir():
+            nested_dest = dest / item.name
+            merge_video_dir_into(nested_dest, item)
+            continue
+        dest_file = dest / item.name
+        if not dest_file.exists():
+            shutil.copy2(item, dest_file)
+            continue
+        if dest_file.read_bytes() == item.read_bytes():
+            continue
+        if item.name in PROTECTED_ARTIFACTS:
+            if item.name == "metadata.json":
+                _merge_metadata_files(dest_file, item)
+            else:
+                _preserve_protected_conflict(dest, dest_file, src, item)
+        else:
+            alt = dest / f"{item.stem}.from-{src.name}{item.suffix}"
+            if not alt.exists():
+                shutil.copy2(item, alt)
+
+    _assert_protected_contents_preserved(dest, src)
+    shutil.rmtree(src)
+
+
+def _merge_metadata_files(dest_file: Path, src_file: Path) -> None:
+    try:
+        dest_meta = json.loads(dest_file.read_text(encoding="utf-8"))
+        src_meta = json.loads(src_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _preserve_protected_conflict(
+            dest_file.parent, dest_file, src_file.parent, src_file
+        )
+        return
+    if not isinstance(dest_meta, dict):
+        dest_meta = {}
+    if isinstance(src_meta, dict):
+        for key, value in src_meta.items():
+            dest_meta.setdefault(key, value)
+    dest_file.write_text(json.dumps(dest_meta, indent=2), encoding="utf-8")
+
+
+def _preserve_protected_conflict(
+    dest_dir: Path,
+    dest_file: Path,
+    src_dir: Path,
+    src_file: Path,
+) -> None:
+    backup = dest_dir / f"{src_file.stem}.from-{src_dir.name}{src_file.suffix}"
+    if not backup.exists():
+        shutil.copy2(src_file, backup)
+    if not dest_file.read_text(encoding="utf-8").strip():
+        shutil.copy2(src_file, dest_file)
+
+
+def _assert_protected_contents_preserved(dest: Path, src: Path) -> None:
+    for name in PROTECTED_ARTIFACTS:
+        src_file = src / name
+        if not src_file.is_file():
+            continue
+        src_bytes = src_file.read_bytes()
+        dest_file = dest / name
+        if dest_file.is_file() and dest_file.read_bytes() == src_bytes:
+            continue
+        backup = dest / f"{src_file.stem}.from-{src.name}{src_file.suffix}"
+        if backup.is_file() and backup.read_bytes() == src_bytes:
+            continue
+        if name == "metadata.json" and dest_file.is_file():
+            try:
+                if src_bytes in dest_file.read_bytes():
+                    continue
+            except OSError:
+                pass
+        raise RuntimeError(
+            f"Refusing to remove {src}: protected file {name} not preserved in {dest}"
+        )
+
+
+def update_day_manifest_video_paths(
+    day_dir: Path,
+    video_id: str,
+    folder_name: str,
+) -> bool:
+    manifest_path = day_dir / "manifest.json"
+    if not manifest_path.is_file():
         return False
-    return left_transcript.read_bytes() == right_transcript.read_bytes()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    video_dir = day_dir / "videos" / folder_name
+    changed = False
+    for entry in manifest.get("videos") or []:
+        if not isinstance(entry, dict) or entry.get("video_id") != video_id:
+            continue
+        if entry.get("archive_folder") != folder_name:
+            entry["archive_folder"] = folder_name
+            changed = True
+        path_map = {
+            "transcript_path": "transcript.md",
+            "summary_path": "summary.md",
+            "metadata_path": "metadata.json",
+        }
+        for key, filename in path_map.items():
+            if key not in entry:
+                continue
+            updated = str(video_dir / filename)
+            if entry.get(key) != updated:
+                entry[key] = updated
+                changed = True
+    if changed:
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return changed
 
 
 def migrate_archive_video_folders(archive_root: Path, index: dict) -> int:
-    """Rename video folders under archive_root; update index archive_folder hints."""
+    """Consolidate video folders; update index and day manifests."""
     migrated = 0
     videos_index = index.setdefault("videos", {})
-    for videos_dir in archive_root.glob("*/*/*/videos"):
+    for videos_dir in sorted(archive_root.glob("*/*/*/videos")):
         if not videos_dir.is_dir():
             continue
-        for child in list(videos_dir.iterdir()):
+        day_dir = videos_dir.parent
+        video_ids: set[str] = set()
+        for child in videos_dir.iterdir():
             if not child.is_dir():
                 continue
-            video_id, title = _read_folder_identity(child)
-            if not video_id:
-                continue
-            before = child.name
-            folder_name = migrate_video_folder(
-                videos_dir, video_id=video_id, title=title or video_id
+            video_id, _ = _read_folder_identity(child)
+            if video_id:
+                video_ids.add(video_id)
+
+        for video_id in sorted(video_ids):
+            title = _best_title_for_video(videos_dir, video_id, videos_index)
+            before = [path.name for path in list_video_dirs(videos_dir, video_id)]
+            folder_name = consolidate_video_folders(
+                videos_dir, video_id=video_id, title=title
             )
-            if before != folder_name:
+            after = [path.name for path in list_video_dirs(videos_dir, video_id)]
+            if before != after or (len(before) == 1 and before[0] != folder_name):
                 migrated += 1
             entry = videos_index.setdefault(video_id, {})
             entry["archive_folder"] = folder_name
             if title:
                 entry.setdefault("title", title)
+            update_day_manifest_video_paths(day_dir, video_id, folder_name)
     return migrated
+
+
+def _best_title_for_video(
+    videos_dir: Path,
+    video_id: str,
+    videos_index: dict[str, dict],
+) -> str:
+    index_title = (videos_index.get(video_id) or {}).get("title")
+    if index_title:
+        return str(index_title)
+    for folder in list_video_dirs(videos_dir, video_id):
+        _, title = _read_folder_identity(folder)
+        if title:
+            return title
+    return video_id
 
 
 def _read_folder_identity(folder: Path) -> tuple[str | None, str | None]:
