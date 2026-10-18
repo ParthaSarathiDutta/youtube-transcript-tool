@@ -56,7 +56,7 @@ def test_iter_playlist_video_entries_paginates():
 
     client = YouTubeDataApiClient("key", http_get=fake_get)
     refs = list(client.iter_playlist_video_entries("PLtest12345"))
-    assert [video_id for video_id, _ in refs] == [
+    assert [video_id for video_id, _, _ in refs] == [
         "vid00000001",
         "vid00000002",
         "vid00000003",
@@ -69,9 +69,9 @@ def test_list_playlist_videos_deduplicates_by_video_id():
     client.get_playlist_title.return_value = "Course"
     client.iter_playlist_video_entries.return_value = iter(
         [
-            ("abc12345678", "A"),
-            ("abc12345678", "A duplicate row"),
-            ("def98765432", "B"),
+            ("abc12345678", "A", None),
+            ("abc12345678", "A duplicate row", None),
+            ("def98765432", "B", None),
         ]
     )
     title, refs = list_playlist_videos(client, "PLx")
@@ -84,12 +84,13 @@ def test_audit_playlist_classifies_archive_gaps():
     client.get_playlist_title.return_value = "AI Talks"
     client.iter_playlist_video_entries.return_value = iter(
         [
-            ("archived1111", "Done"),
-            ("missing2222", "Need transcript"),
-            ("gone3333333", "Deleted"),
+            ("archived1111", "Done", None),
+            ("missing2222", "Need transcript", None),
+            ("gone3333333", "Deleted", None),
         ]
     )
     now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    pub_iso = now.isoformat()
     client.get_videos_details.return_value = {
         "archived1111": ApiVideoDetails(
             video_id="archived1111",
@@ -122,6 +123,9 @@ def test_audit_playlist_classifies_archive_gaps():
     assert [item.video_id for item in report.already_archived] == ["archived1111"]
     assert [item.video_id for item in report.missing_transcripts] == ["missing2222"]
     assert [item.video_id for item in report.unavailable] == ["gone3333333"]
+    payload = report.to_dict()
+    assert payload["missing_transcripts"][0]["youtube_published_at_utc"] == pub_iso
+    assert payload["already_archived"][0]["youtube_published_at_utc"] == pub_iso
 
 
 def test_parse_playlist_input_rejects_invalid():

@@ -14,7 +14,8 @@ from discovery.service import VideoDiscoveryService
 from discovery.window import CHICAGO, REPORTING_WINDOW_POLICY
 from discovery.youtube_data_api import YouTubeDataApiClient
 from document_writer import DailyVideoDocument
-from pipeline.archive_paths import build_video_folder_name, migrate_archive_video_folders
+from pipeline.archive_index import upsert_video_index_entry
+from pipeline.archive_paths import migrate_archive_video_folders
 from pipeline.archive_store import (
     _email_section_text,
     digest_day_paths,
@@ -415,15 +416,7 @@ def _update_index(
     *,
     success: bool,
 ) -> None:
-    videos = index.setdefault("videos", {})
-    videos[record.video_id] = {
-        "title": record.title,
-        "published_at_utc": record.published_at_utc.isoformat(),
-        "transcript_status": "success" if success else "failed",
-        "transcript_provider": transcript.provider,
-        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "archive_folder": build_video_folder_name(record.title, record.video_id),
-    }
+    upsert_video_index_entry(index, record, transcript, success=success)
 
 
 def _format_email_video_section(

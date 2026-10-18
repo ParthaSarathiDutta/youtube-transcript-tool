@@ -222,7 +222,11 @@ class YouTubeDataApiClient:
         max_pages: int = 100,
     ):
         """
-        Yield (video_id, title) for every item in a playlist, following pagination.
+        Yield (video_id, title, playlist_published_at_utc) for each playlist item.
+
+        ``playlist_published_at_utc`` comes from playlistItems contentDetails
+        (videoPublishedAt). Authoritative YouTube upload time is still from
+        videos.list (see audit enrichment).
         """
         page_token: str | None = None
         pages = 0
@@ -248,7 +252,11 @@ class YouTubeDataApiClient:
                     continue
                 snippet = item.get("snippet") or {}
                 title = snippet.get("title") or video_id
-                yield video_id, title
+                published_raw = content.get("videoPublishedAt")
+                published = (
+                    parse_rfc3339_utc(published_raw) if published_raw else None
+                )
+                yield video_id, title, published
 
             page_token = data.get("nextPageToken")
             if not page_token:
