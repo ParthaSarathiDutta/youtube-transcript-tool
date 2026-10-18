@@ -16,6 +16,7 @@ from discovery.models import (
     VideoType,
 )
 from document_writer import DailyVideoDocument, write_daily_combined_document
+from pipeline.archive_paths import resolve_video_dir
 from pipeline.archive_store import load_index, save_index, video_already_processed
 from pipeline.config import PipelineConfig, load_config
 from pipeline.daily_run import run_daily_digest
@@ -156,7 +157,8 @@ def test_pipeline_transcript_only_without_openai(tmp_path: Path):
     assert result.videos_processed == 1
     assert result.llm_mocked is True
     day_dir = Path(result.archive_dir)
-    video_dir = day_dir / "videos" / "testvideo001"
+    video_dir = resolve_video_dir(day_dir / "videos", "testvideo001")
+    assert video_dir is not None
     assert (video_dir / "transcript.md").exists()
     assert not (video_dir / "summary.md").exists()
     preview = (day_dir / "email-preview.txt").read_text(encoding="utf-8")
@@ -210,7 +212,8 @@ def test_pipeline_vertical_slice_with_mocks(tmp_path: Path):
     assert (day_dir / "manifest.json").exists()
     assert (day_dir / "transcripts-combined.docx").exists()
     assert (day_dir / "daily-summary.md").exists()
-    video_dir = day_dir / "videos" / "testvideo001"
+    video_dir = resolve_video_dir(day_dir / "videos", "testvideo001")
+    assert video_dir is not None
     assert (video_dir / "transcript.md").exists()
     assert (video_dir / "summary.md").exists()
     manifest = json.loads((day_dir / "manifest.json").read_text())

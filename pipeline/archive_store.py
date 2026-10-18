@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from document_writer import DailyVideoDocument, write_daily_combined_document
+from pipeline.archive_paths import migrate_video_folder, resolve_video_dir
 from pipeline.git_archive import (
     ArchiveGitError,
     clone_archive_repo,
@@ -34,6 +35,7 @@ class VideoArchiveEntry:
     summary_path: str | None
     transcript_path: str | None
     metadata_path: str
+    archive_folder: str | None = None
 
 
 def digest_day_paths(archive_root: Path, digest_date: date) -> dict[str, Path]:
@@ -114,8 +116,15 @@ class HydratedVideo:
     manifest_entry: dict[str, Any]
 
 
-def load_hydrated_video(videos_dir: Path, video_id: str) -> HydratedVideo | None:
-    video_dir = videos_dir / video_id
+def load_hydrated_video(
+    videos_dir: Path,
+    video_id: str,
+    *,
+    folder_hint: str | None = None,
+) -> HydratedVideo | None:
+    video_dir = resolve_video_dir(videos_dir, video_id, folder_hint=folder_hint)
+    if video_dir is None:
+        return None
     metadata_path = video_dir / "metadata.json"
     transcript_path = video_dir / "transcript.md"
     summary_path = video_dir / "summary.md"
@@ -169,6 +178,7 @@ def load_hydrated_video(videos_dir: Path, video_id: str) -> HydratedVideo | None
         "discovery_category": metadata.get("discovery_category", ""),
         "transcript_status": metadata.get("transcript_status", "success"),
         "transcript_provider": metadata.get("transcript_provider"),
+        "archive_folder": video_dir.name,
         "summary_path": str(summary_path),
         "transcript_path": str(transcript_path),
         "metadata_path": str(metadata_path),
@@ -215,7 +225,12 @@ def write_video_artifacts(
     transcript_md: str,
     summary_md: str | None = None,
 ) -> VideoArchiveEntry:
-    video_dir = videos_dir / video_id
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    title = str(metadata.get("title") or video_id)
+    folder_name = migrate_video_folder(
+        videos_dir, video_id=video_id, title=title
+    )
+    video_dir = videos_dir / folder_name
     video_dir.mkdir(parents=True, exist_ok=True)
     transcript_path = video_dir / "transcript.md"
     summary_path = video_dir / "summary.md"
@@ -225,6 +240,7 @@ def write_video_artifacts(
     if summary_md is not None:
         summary_path.write_text(summary_md, encoding="utf-8")
         summary_path_str = str(summary_path)
+    metadata = {**metadata, "archive_folder": folder_name}
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return VideoArchiveEntry(
         video_id=video_id,
@@ -237,6 +253,7 @@ def write_video_artifacts(
         summary_path=summary_path_str,
         transcript_path=str(transcript_path),
         metadata_path=str(metadata_path),
+        archive_folder=folder_name,
     )
 
 

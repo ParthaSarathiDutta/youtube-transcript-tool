@@ -14,6 +14,7 @@ from discovery.service import VideoDiscoveryService
 from discovery.window import CHICAGO, REPORTING_WINDOW_POLICY
 from discovery.youtube_data_api import YouTubeDataApiClient
 from document_writer import DailyVideoDocument
+from pipeline.archive_paths import build_video_folder_name, migrate_archive_video_folders
 from pipeline.archive_store import (
     _email_section_text,
     digest_day_paths,
@@ -73,6 +74,8 @@ def run_daily_digest(
     paths["day_dir"].mkdir(parents=True, exist_ok=True)
     paths["videos_dir"].mkdir(parents=True, exist_ok=True)
     index = load_index(config.archive_root)
+    migrate_archive_video_folders(config.archive_root, index)
+    save_index(config.archive_root, index)
 
     manifest: dict[str, Any] = {
         "digest_date": digest_date.isoformat(),
@@ -114,6 +117,7 @@ def run_daily_digest(
                 manifest,
                 hydrated_ids,
                 include_in_email=include_in_email,
+                index=index,
             )
             continue
         if record.status.value not in ("discovered",):
@@ -302,10 +306,14 @@ def _hydrate_video_artifacts(
     hydrated_ids: set[str],
     *,
     include_in_email: bool,
+    index: dict[str, Any],
 ) -> None:
     if video_id in hydrated_ids:
         return
-    hydrated = load_hydrated_video(videos_dir, video_id)
+    folder_hint = (index.get("videos") or {}).get(video_id, {}).get("archive_folder")
+    hydrated = load_hydrated_video(
+        videos_dir, video_id, folder_hint=folder_hint
+    )
     if not hydrated:
         return
     if include_in_email:
@@ -414,6 +422,7 @@ def _update_index(
         "transcript_status": "success" if success else "failed",
         "transcript_provider": transcript.provider,
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "archive_folder": build_video_folder_name(record.title, record.video_id),
     }
 
 
