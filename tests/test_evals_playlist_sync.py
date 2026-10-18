@@ -11,10 +11,12 @@ import pytest
 
 from discovery.playlist import PlaylistVideoRef
 from pipeline.config import PipelineConfig
+from pipeline.archive_store import video_archived_for_daily_digest
 from pipeline.evals_playlist_sync import (
     EVALS_ARCHIVE_SUBPATH,
     PlaylistVideoSyncEntry,
     locate_global_transcript_dir,
+    markdown_transcript_link,
     resolve_playlist_video_entry,
     sync_evals_playlist,
     write_playlist_index_artifacts,
@@ -176,6 +178,84 @@ def test_sync_extracts_one_video_and_writes_metadata(tmp_path: Path):
     assert metadata["transcript_generated_at_utc"]
     assert (evals_dir / "playlist-index.json").is_file()
     assert (evals_dir / "index.md").is_file()
+
+
+def test_markdown_transcript_link_uses_paths_relative_to_index_md(tmp_path: Path):
+    archive_root = tmp_path
+    evals_dir = archive_root / EVALS_ARCHIVE_SUBPATH
+    evals_dir.mkdir(parents=True)
+    local = evals_dir / "Talk__vid12345678" / "transcript.md"
+    local.parent.mkdir(parents=True)
+    local.write_text("t", encoding="utf-8")
+    daily = archive_root / "2026" / "10" / "17" / "videos" / "Talk__vid12345678" / "transcript.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text("t", encoding="utf-8")
+    local_link = markdown_transcript_link(
+        evals_dir=evals_dir,
+        archive_root=archive_root,
+        transcript_location="responsiv/evals/Talk__vid12345678/transcript.md",
+    )
+    assert local_link.endswith("(Talk__vid12345678/transcript.md)")
+    daily_link = markdown_transcript_link(
+        evals_dir=evals_dir,
+        archive_root=archive_root,
+        transcript_location="2026/10/17/videos/Talk__vid12345678/transcript.md",
+    )
+    assert "../../2026/10/17/videos/Talk__vid12345678/transcript.md" in daily_link
+
+
+def test_playlist_only_success_does_not_block_daily_when_no_daily_folder(
+    tmp_path: Path,
+):
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    video_id = "playlist001"
+    evals_dir = archive_root / EVALS_ARCHIVE_SUBPATH / f"Talk__{video_id}"
+    evals_dir.mkdir(parents=True)
+    (evals_dir / "transcript.md").write_text("playlist only", encoding="utf-8")
+    index = {
+        "videos": {
+            video_id: {
+                "transcript_status": "success",
+                "evals_playlist_transcript_status": "success",
+            }
+        }
+    }
+    assert video_archived_for_daily_digest(
+        index, video_id, archive_root=archive_root
+    ) is False
+
+
+def test_sync_keeps_missing_youtube_published_at_null(tmp_path: Path):
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    (archive_root / "index.json").write_text(json.dumps({"videos": {}}), encoding="utf-8")
+    refs = [PlaylistVideoRef("missing22222", "Need transcript", 1, None)]
+    client = MagicMock()
+    client.get_videos_details.return_value = {}
+    transcript = TranscriptResult(
+        segments=[],
+        language_code="en",
+        is_generated=True,
+        display_text="Hello transcript body long enough",
+        provider="youtube-api",
+    )
+    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+            sync_evals_playlist(
+                _config(archive_root),
+                dry_run=False,
+                pull=False,
+                push=False,
+                video_id="missing22222",
+                fetch_transcript_fn=lambda _vid: transcript,
+            )
+    meta = json.loads(
+        next((archive_root / EVALS_ARCHIVE_SUBPATH).glob("*/metadata.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert meta.get("youtube_published_at_utc") is None
 
 
 def test_metadata_merge_preserves_transcript_generated_at(tmp_path: Path):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,14 +21,13 @@ from discovery.playlist import (
     parse_playlist_input,
 )
 from discovery.youtube_data_api import ApiVideoDetails, YouTubeDataApiClient
-from pipeline.archive_index import upsert_video_index_entry
+from pipeline.archive_index import TRANSCRIPT_SCOPE_PLAYLIST, upsert_video_index_entry
 from pipeline.archive_paths import build_video_folder_name, resolve_video_dir
 from pipeline.archive_store import (
     load_index,
     maybe_push_to_github_archive,
     save_index,
     sync_archive_from_github,
-    video_already_processed,
     write_video_artifacts,
 )
 from pipeline.config import PipelineConfig
@@ -258,7 +258,7 @@ def resolve_playlist_video_entry(
         index,
         exclude_prefix=evals_dir,
     )
-    if global_dir is not None and video_already_processed(index, ref.video_id):
+    if global_dir is not None:
         global_meta = global_dir / "metadata.json"
         fields = _read_metadata_fields(global_meta) if global_meta.is_file() else {}
         transcript_path = global_dir / "transcript.md"
@@ -277,13 +277,36 @@ def resolve_playlist_video_entry(
     return replace(entry, action="missing")
 
 
-def _parse_published(ref: PlaylistVideoRef, detail: ApiVideoDetails | None) -> datetime:
-    raw = ref.youtube_published_at_utc
+def _published_iso(
+    ref: PlaylistVideoRef,
+    detail: ApiVideoDetails | None,
+) -> str | None:
     if detail is not None:
-        return detail.published_at_utc
+        return detail.published_at_utc.isoformat()
+    return ref.youtube_published_at_utc
+
+
+def _published_datetime_for_record(
+    ref: PlaylistVideoRef,
+    detail: ApiVideoDetails | None,
+) -> datetime:
+    """Placeholder for DiscoveryRecord when YouTube publish time is unknown."""
+    raw = _published_iso(ref, detail)
     if raw:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    return datetime.now(timezone.utc)
+    return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def markdown_transcript_link(
+    *,
+    evals_dir: Path,
+    archive_root: Path,
+    transcript_location: str,
+) -> str:
+    """GitHub-friendly relative link from responsiv/evals/index.md to a transcript file."""
+    target = (archive_root / transcript_location).resolve()
+    href = Path(os.path.relpath(target, evals_dir.resolve())).as_posix()
+    return f"[{transcript_location}]({href})"
 
 
 def _load_playlist_index(evals_dir: Path) -> dict[str, Any]:
@@ -346,7 +369,11 @@ def write_playlist_index_artifacts(
     for entry in sorted(entries, key=lambda item: item.position):
         loc = entry.transcript_location or "—"
         if loc != "—":
-            loc = f"[{loc}]({loc})"
+            loc = markdown_transcript_link(
+                evals_dir=evals_dir,
+                archive_root=archive_root,
+                transcript_location=loc,
+            )
         lines.append(
             f"| {entry.position} | {entry.title} | {entry.youtube_url} | {loc} | "
             f"{entry.youtube_published_at_utc or '—'} | "
@@ -447,7 +474,7 @@ def sync_evals_playlist(
             continue
 
         youtube_url = entry.youtube_url
-        published_iso = entry.youtube_published_at_utc
+        published_iso = _published_iso(ref, detail)
         evals_video_path = _evals_video_dir(evals_dir, ref.title, ref.video_id)
 
         if dry_run:
@@ -468,9 +495,15 @@ def sync_evals_playlist(
                 video_id=ref.video_id,
                 title=ref.title,
                 youtube_url=youtube_url,
-                published_at_utc=_parse_published(ref, detail),
+                published_at_utc=_published_datetime_for_record(ref, detail),
             )
-            upsert_video_index_entry(index, record, transcript, success=False)
+            upsert_video_index_entry(
+                index,
+                record,
+                transcript,
+                success=False,
+                transcript_scope=TRANSCRIPT_SCOPE_PLAYLIST,
+            )
             continue
 
         generated_at = _utc_now_iso()
@@ -517,9 +550,15 @@ def sync_evals_playlist(
             video_id=ref.video_id,
             title=ref.title,
             youtube_url=youtube_url,
-            published_at_utc=_parse_published(ref, detail),
+            published_at_utc=_published_datetime_for_record(ref, detail),
         )
-        upsert_video_index_entry(index, record, transcript, success=True)
+        upsert_video_index_entry(
+            index,
+            record,
+            transcript,
+            success=True,
+            transcript_scope=TRANSCRIPT_SCOPE_PLAYLIST,
+        )
 
         sync_entries.append(entry)
 
