@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,7 +65,7 @@ class EvalsPlaylistSyncResult:
     archive_subpath: str
     videos: list[PlaylistVideoSyncEntry] = field(default_factory=list)
     extracted: int = 0
-    referenced: int = 0
+    copied: int = 0
     skipped: int = 0
     failed: int = 0
     archive_pull: str | None = None
@@ -78,7 +79,7 @@ class EvalsPlaylistSyncResult:
             "archive_subpath": self.archive_subpath,
             "counts": {
                 "extracted": self.extracted,
-                "referenced": self.referenced,
+                "copied": self.copied,
                 "skipped": self.skipped,
                 "failed": self.failed,
                 "playlist_videos": len(self.videos),
@@ -117,7 +118,7 @@ def _merge_metadata_preserve_timestamps(
 ) -> dict[str, Any]:
     merged = {**existing, **updates}
     for key in ("youtube_published_at_utc", "transcript_generated_at_utc"):
-        if existing.get(key):
+        if key in existing:
             merged[key] = existing[key]
     return merged
 
@@ -154,11 +155,15 @@ def locate_global_transcript_dir(
             except ValueError:
                 pass
         resolved = resolve_video_dir(videos_dir, video_id, folder_hint=folder_hint)
-        if resolved is not None and (resolved / "transcript.md").is_file():
+        if resolved is not None and is_valid_transcript_file(resolved / "transcript.md"):
             candidates.append(resolved)
     if not candidates:
         return None
     return candidates[0]
+
+
+def is_valid_transcript_file(path: Path) -> bool:
+    return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
 
 
 def _evals_video_dir(evals_dir: Path, title: str, video_id: str) -> Path:
@@ -175,6 +180,130 @@ def _read_metadata_fields(metadata_path: Path) -> dict[str, Any]:
         "transcript_generated_at_utc": generated,
         "transcript_provider": meta.get("transcript_provider"),
     }
+
+
+def _entry_from_evals_folder(
+    entry: PlaylistVideoSyncEntry,
+    *,
+    archive_root: Path,
+    evals_video_path: Path,
+) -> PlaylistVideoSyncEntry:
+    transcript_path = evals_video_path / "transcript.md"
+    meta_path = evals_video_path / "metadata.json"
+    fields = _read_metadata_fields(meta_path) if meta_path.is_file() else {}
+    return replace(
+        entry,
+        transcript_location=_relative_archive_path(archive_root, transcript_path),
+        transcript_source="evals_archive",
+        youtube_published_at_utc=(
+            fields.get("youtube_published_at_utc") or entry.youtube_published_at_utc
+        ),
+        transcript_generated_at_utc=fields.get("transcript_generated_at_utc"),
+        transcript_provider=fields.get("transcript_provider"),
+        action="skipped",
+    )
+
+
+def _generation_time_from_sources(
+    source_meta: dict[str, Any],
+    index_entry: dict[str, Any],
+) -> str | None:
+    for candidate in (
+        source_meta.get("transcript_generated_at_utc"),
+        index_entry.get("transcript_generated_at_utc"),
+    ):
+        if candidate:
+            return str(candidate)
+    return None
+
+
+def _build_evals_metadata(
+    *,
+    video_id: str,
+    title: str,
+    youtube_url: str,
+    youtube_published_at_utc: str | None,
+    transcript_provider: str | None,
+    transcript_generated_at_utc: str | None,
+) -> dict[str, Any]:
+    return {
+        "video_id": video_id,
+        "title": title,
+        "youtube_url": youtube_url,
+        "youtube_published_at_utc": youtube_published_at_utc,
+        "transcript_generated_at_utc": transcript_generated_at_utc,
+        "transcript_provider": transcript_provider,
+    }
+
+
+def copy_daily_transcript_to_evals(
+    *,
+    archive_root: Path,
+    evals_dir: Path,
+    ref: PlaylistVideoRef,
+    detail: ApiVideoDetails | None,
+    daily_dir: Path,
+    index: dict[str, Any],
+) -> PlaylistVideoSyncEntry:
+    """Copy transcript.md + metadata into responsiv/evals without re-downloading."""
+    youtube_url = build_video_url(ref.video_id)
+    published_iso = _published_iso(ref, detail)
+    evals_video_path = _evals_video_dir(evals_dir, ref.title, ref.video_id)
+    entry = PlaylistVideoSyncEntry(
+        video_id=ref.video_id,
+        title=ref.title,
+        youtube_url=youtube_url,
+        position=ref.position,
+        youtube_published_at_utc=published_iso,
+    )
+
+    if is_valid_transcript_file(evals_video_path / "transcript.md"):
+        return _entry_from_evals_folder(
+            entry, archive_root=archive_root, evals_video_path=evals_video_path
+        )
+
+    daily_meta_path = daily_dir / "metadata.json"
+    daily_fields = _read_metadata_fields(daily_meta_path) if daily_meta_path.is_file() else {}
+    index_entry = (index.get("videos") or {}).get(ref.video_id) or {}
+    generated_at = _generation_time_from_sources(daily_fields, index_entry)
+    provider = daily_fields.get("transcript_provider") or index_entry.get(
+        "transcript_provider"
+    )
+    published_iso = published_iso or daily_fields.get("youtube_published_at_utc")
+
+    evals_video_path.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(daily_dir / "transcript.md", evals_video_path / "transcript.md")
+
+    metadata = _build_evals_metadata(
+        video_id=ref.video_id,
+        title=ref.title,
+        youtube_url=youtube_url,
+        youtube_published_at_utc=published_iso,
+        transcript_provider=provider,
+        transcript_generated_at_utc=generated_at,
+    )
+    existing_meta_path = evals_video_path / "metadata.json"
+    if existing_meta_path.is_file():
+        metadata = _merge_metadata_preserve_timestamps(
+            _load_json_dict(existing_meta_path),
+            metadata,
+        )
+    metadata["archive_folder"] = evals_video_path.name
+    (evals_video_path / "metadata.json").write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8",
+    )
+
+    transcript_path = evals_video_path / "transcript.md"
+    return replace(
+        entry,
+        transcript_location=_relative_archive_path(archive_root, transcript_path),
+        transcript_source="evals_archive",
+        youtube_published_at_utc=metadata.get("youtube_published_at_utc"),
+        transcript_generated_at_utc=metadata.get("transcript_generated_at_utc"),
+        transcript_provider=metadata.get("transcript_provider"),
+        action="copied",
+    )
 
 
 def _discovery_record(
@@ -205,9 +334,7 @@ def _base_sync_entry(
     prior: dict[str, Any],
 ) -> PlaylistVideoSyncEntry:
     youtube_url = build_video_url(ref.video_id)
-    published_iso = ref.youtube_published_at_utc
-    if detail is not None:
-        published_iso = detail.published_at_utc.isoformat()
+    published_iso = _published_iso(ref, detail)
     return PlaylistVideoSyncEntry(
         video_id=ref.video_id,
         title=ref.title,
@@ -230,51 +357,27 @@ def resolve_playlist_video_entry(
     detail: ApiVideoDetails | None,
     prior: dict[str, Any],
 ) -> PlaylistVideoSyncEntry:
-    """Classify a playlist row without downloading transcripts."""
+    """Classify a playlist row without downloading or copying transcripts."""
     entry = _base_sync_entry(ref, detail=detail, prior=prior)
     if not _is_transcript_eligible(detail):
         return replace(entry, action="skipped", error="not_eligible")
 
     evals_video_path = _evals_video_dir(evals_dir, ref.title, ref.video_id)
-    local_transcript = evals_video_path / "transcript.md"
-    if local_transcript.is_file():
-        meta_path = evals_video_path / "metadata.json"
-        fields = _read_metadata_fields(meta_path) if meta_path.is_file() else {}
-        return replace(
-            entry,
-            transcript_location=_relative_archive_path(archive_root, local_transcript),
-            transcript_source="evals_archive",
-            youtube_published_at_utc=(
-                fields.get("youtube_published_at_utc") or entry.youtube_published_at_utc
-            ),
-            transcript_generated_at_utc=fields.get("transcript_generated_at_utc"),
-            transcript_provider=fields.get("transcript_provider"),
-            action="skipped",
+    if is_valid_transcript_file(evals_video_path / "transcript.md"):
+        return _entry_from_evals_folder(
+            entry, archive_root=archive_root, evals_video_path=evals_video_path
         )
 
-    global_dir = locate_global_transcript_dir(
+    daily_dir = locate_global_transcript_dir(
         archive_root,
         ref.video_id,
         index,
         exclude_prefix=evals_dir,
     )
-    if global_dir is not None:
-        global_meta = global_dir / "metadata.json"
-        fields = _read_metadata_fields(global_meta) if global_meta.is_file() else {}
-        transcript_path = global_dir / "transcript.md"
-        return replace(
-            entry,
-            transcript_location=_relative_archive_path(archive_root, transcript_path),
-            transcript_source="global_archive",
-            youtube_published_at_utc=(
-                fields.get("youtube_published_at_utc") or entry.youtube_published_at_utc
-            ),
-            transcript_generated_at_utc=fields.get("transcript_generated_at_utc"),
-            transcript_provider=fields.get("transcript_provider"),
-            action="referenced",
-        )
+    if daily_dir is not None:
+        return replace(entry, action="needs_copy")
 
-    return replace(entry, action="missing")
+    return replace(entry, action="needs_extract")
 
 
 def _published_iso(
@@ -306,7 +409,8 @@ def markdown_transcript_link(
     """GitHub-friendly relative link from responsiv/evals/index.md to a transcript file."""
     target = (archive_root / transcript_location).resolve()
     href = Path(os.path.relpath(target, evals_dir.resolve())).as_posix()
-    return f"[{transcript_location}]({href})"
+    label = Path(transcript_location).as_posix()
+    return f"[{label}]({href})"
 
 
 def _load_playlist_index(evals_dir: Path) -> dict[str, Any]:
@@ -368,7 +472,7 @@ def write_playlist_index_artifacts(
     ]
     for entry in sorted(entries, key=lambda item: item.position):
         loc = entry.transcript_location or "—"
-        if loc != "—":
+        if loc != "—" and loc.startswith(EVALS_ARCHIVE_SUBPATH.as_posix()):
             loc = markdown_transcript_link(
                 evals_dir=evals_dir,
                 archive_root=archive_root,
@@ -381,6 +485,142 @@ def write_playlist_index_artifacts(
             f"{entry.transcript_provider or '—'} |"
         )
     (evals_dir / INDEX_MD).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _process_playlist_video(
+    *,
+    archive_root: Path,
+    evals_dir: Path,
+    index: dict[str, Any],
+    ref: PlaylistVideoRef,
+    detail: ApiVideoDetails | None,
+    prior: dict[str, Any],
+    dry_run: bool,
+    fetch_transcript_fn: Callable[[str], TranscriptResult],
+) -> tuple[PlaylistVideoSyncEntry, str]:
+    """Returns (entry, outcome) where outcome is extracted|copied|skipped|failed|planned_*."""
+    entry = resolve_playlist_video_entry(
+        archive_root=archive_root,
+        evals_dir=evals_dir,
+        index=index,
+        ref=ref,
+        detail=detail,
+        prior=prior,
+    )
+    if entry.action == "skipped":
+        return entry, "skipped"
+    if entry.action == "needs_copy":
+        if dry_run:
+            return replace(entry, action="would_copy"), "would_copy"
+        daily_dir = locate_global_transcript_dir(
+            archive_root,
+            ref.video_id,
+            index,
+            exclude_prefix=evals_dir,
+        )
+        assert daily_dir is not None
+        copied_entry = copy_daily_transcript_to_evals(
+            archive_root=archive_root,
+            evals_dir=evals_dir,
+            ref=ref,
+            detail=detail,
+            daily_dir=daily_dir,
+            index=index,
+        )
+        return copied_entry, "copied"
+
+    if entry.action != "needs_extract":
+        return entry, entry.action
+
+    if dry_run:
+        return replace(entry, action="would_extract"), "would_extract"
+
+    youtube_url = entry.youtube_url
+    published_iso = _published_iso(ref, detail)
+    evals_video_path = _evals_video_dir(evals_dir, ref.title, ref.video_id)
+
+    if is_valid_transcript_file(evals_video_path / "transcript.md"):
+        return _entry_from_evals_folder(
+            entry, archive_root=archive_root, evals_video_path=evals_video_path
+        ), "skipped"
+
+    transcript = fetch_transcript_fn(ref.video_id)
+    if not transcript.available:
+        record = _discovery_record(
+            video_id=ref.video_id,
+            title=ref.title,
+            youtube_url=youtube_url,
+            published_at_utc=_published_datetime_for_record(ref, detail),
+        )
+        upsert_video_index_entry(
+            index,
+            record,
+            transcript,
+            success=False,
+            transcript_scope=TRANSCRIPT_SCOPE_PLAYLIST,
+        )
+        return (
+            replace(
+                entry,
+                action="failed",
+                error=transcript.error_message or "transcript_unavailable",
+            ),
+            "failed",
+        )
+
+    generated_at = _utc_now_iso()
+    metadata = _build_evals_metadata(
+        video_id=ref.video_id,
+        title=ref.title,
+        youtube_url=youtube_url,
+        youtube_published_at_utc=published_iso,
+        transcript_provider=transcript.provider,
+        transcript_generated_at_utc=generated_at,
+    )
+    existing_meta_path = evals_video_path / "metadata.json"
+    if existing_meta_path.is_file():
+        metadata = _merge_metadata_preserve_timestamps(
+            _load_json_dict(existing_meta_path),
+            metadata,
+        )
+
+    transcript_md = (
+        f"# {ref.title}\n\n"
+        f"URL: {youtube_url}\n\n"
+        f"{transcript.display_text}\n"
+    )
+    evals_dir.mkdir(parents=True, exist_ok=True)
+    folder_name = write_video_artifacts(
+        videos_dir=evals_dir,
+        video_id=ref.video_id,
+        metadata=metadata,
+        transcript_md=transcript_md,
+        summary_md=None,
+    ).archive_folder
+    transcript_path = evals_dir / str(folder_name) / "transcript.md"
+    extracted_entry = replace(
+        entry,
+        transcript_location=_relative_archive_path(archive_root, transcript_path),
+        transcript_source="evals_archive",
+        transcript_generated_at_utc=metadata.get("transcript_generated_at_utc"),
+        transcript_provider=metadata.get("transcript_provider"),
+        action="extracted",
+    )
+
+    record = _discovery_record(
+        video_id=ref.video_id,
+        title=ref.title,
+        youtube_url=youtube_url,
+        published_at_utc=_published_datetime_for_record(ref, detail),
+    )
+    upsert_video_index_entry(
+        index,
+        record,
+        transcript,
+        success=True,
+        transcript_scope=TRANSCRIPT_SCOPE_PLAYLIST,
+    )
+    return extracted_entry, "extracted"
 
 
 def sync_evals_playlist(
@@ -406,24 +646,16 @@ def sync_evals_playlist(
         archive_subpath=EVALS_ARCHIVE_SUBPATH.as_posix(),
     )
 
-    if pull and not dry_run:
-        try:
-            result.archive_pull = sync_archive_from_github(
-                archive_root=archive_root,
-                repo=config.archive_github_repo,
-                token=config.archive_github_token,
-            )
-        except ArchiveGitError as exc:
-            raise RuntimeError(str(exc)) from exc
-    elif pull and dry_run and config.archive_github_repo and config.archive_github_token:
-        try:
-            result.archive_pull = sync_archive_from_github(
-                archive_root=archive_root,
-                repo=config.archive_github_repo,
-                token=config.archive_github_token,
-            )
-        except ArchiveGitError as exc:
-            raise RuntimeError(str(exc)) from exc
+    if pull:
+        if not dry_run or (config.archive_github_repo and config.archive_github_token):
+            try:
+                result.archive_pull = sync_archive_from_github(
+                    archive_root=archive_root,
+                    repo=config.archive_github_repo,
+                    token=config.archive_github_token,
+                )
+            except ArchiveGitError as exc:
+                raise RuntimeError(str(exc)) from exc
 
     index = load_index(archive_root)
     prior_rows = _prior_playlist_entries(evals_dir)
@@ -450,116 +682,27 @@ def sync_evals_playlist(
                 detail=detail,
                 prior=prior,
             )
-            if entry.action == "referenced":
-                result.referenced += 1
-            elif entry.action == "skipped":
-                result.skipped += 1
             sync_entries.append(entry)
             continue
 
-        entry = resolve_playlist_video_entry(
+        entry, outcome = _process_playlist_video(
             archive_root=archive_root,
             evals_dir=evals_dir,
             index=index,
             ref=ref,
             detail=detail,
             prior=prior,
+            dry_run=dry_run,
+            fetch_transcript_fn=fetch_transcript_fn,
         )
-        if entry.action in ("skipped", "referenced"):
-            if entry.action == "referenced":
-                result.referenced += 1
-            else:
-                result.skipped += 1
-            sync_entries.append(entry)
-            continue
-
-        youtube_url = entry.youtube_url
-        published_iso = _published_iso(ref, detail)
-        evals_video_path = _evals_video_dir(evals_dir, ref.title, ref.video_id)
-
-        if dry_run:
-            sync_entries.append(replace(entry, action="would_extract"))
-            continue
-
-        transcript = fetch_transcript_fn(ref.video_id)
-        if not transcript.available:
+        if outcome == "extracted":
+            result.extracted += 1
+        elif outcome == "copied":
+            result.copied += 1
+        elif outcome == "skipped":
+            result.skipped += 1
+        elif outcome == "failed":
             result.failed += 1
-            sync_entries.append(
-                replace(
-                    entry,
-                    action="failed",
-                    error=transcript.error_message or "transcript_unavailable",
-                )
-            )
-            record = _discovery_record(
-                video_id=ref.video_id,
-                title=ref.title,
-                youtube_url=youtube_url,
-                published_at_utc=_published_datetime_for_record(ref, detail),
-            )
-            upsert_video_index_entry(
-                index,
-                record,
-                transcript,
-                success=False,
-                transcript_scope=TRANSCRIPT_SCOPE_PLAYLIST,
-            )
-            continue
-
-        generated_at = _utc_now_iso()
-        metadata = {
-            "video_id": ref.video_id,
-            "title": ref.title,
-            "youtube_url": youtube_url,
-            "youtube_published_at_utc": published_iso,
-            "transcript_generated_at_utc": generated_at,
-            "transcript_provider": transcript.provider,
-        }
-        existing_meta_path = evals_video_path / "metadata.json"
-        if existing_meta_path.is_file():
-            metadata = _merge_metadata_preserve_timestamps(
-                _load_json_dict(existing_meta_path),
-                metadata,
-            )
-
-        transcript_md = (
-            f"# {ref.title}\n\n"
-            f"URL: {youtube_url}\n\n"
-            f"{transcript.display_text}\n"
-        )
-        evals_dir.mkdir(parents=True, exist_ok=True)
-        folder_name = write_video_artifacts(
-            videos_dir=evals_dir,
-            video_id=ref.video_id,
-            metadata=metadata,
-            transcript_md=transcript_md,
-            summary_md=None,
-        ).archive_folder
-        transcript_path = evals_dir / str(folder_name) / "transcript.md"
-        entry = replace(
-            entry,
-            transcript_location=_relative_archive_path(archive_root, transcript_path),
-            transcript_source="evals_archive",
-            transcript_generated_at_utc=metadata.get("transcript_generated_at_utc"),
-            transcript_provider=metadata.get("transcript_provider"),
-            action="extracted",
-        )
-        result.extracted += 1
-
-        record = _discovery_record(
-            video_id=ref.video_id,
-            title=ref.title,
-            youtube_url=youtube_url,
-            published_at_utc=_published_datetime_for_record(ref, detail),
-        )
-        upsert_video_index_entry(
-            index,
-            record,
-            transcript,
-            success=True,
-            transcript_scope=TRANSCRIPT_SCOPE_PLAYLIST,
-        )
-
         sync_entries.append(entry)
 
     result.videos = sync_entries
@@ -578,13 +721,5 @@ def sync_evals_playlist(
                 repo=config.archive_github_repo,
                 token=config.archive_github_token,
             )
-    else:
-        write_playlist_index_artifacts(
-            archive_root=archive_root,
-            playlist_id=playlist_id,
-            playlist_title=playlist_title,
-            entries=sync_entries,
-            dry_run=True,
-        )
 
     return result
