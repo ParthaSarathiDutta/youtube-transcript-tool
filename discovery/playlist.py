@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
-from discovery.youtube_data_api import ApiVideoDetails, YouTubeDataApiClient
+from discovery.youtube_data_api import ApiVideoDetails, YouTubeApiError, YouTubeDataApiClient
 from pipeline.archive_store import video_already_processed
-from youtube_utils import UrlType, build_video_url, parse_youtube_url
+from youtube_utils import UrlType, build_video_url, fetch_playlist_metadata, parse_youtube_url
 
 _PLAYLIST_ID_PATTERN = re.compile(r"^[\w-]+$")
 
@@ -88,11 +88,18 @@ def _iso_utc(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def list_playlist_videos(
+def _should_fallback_to_ytdlp(exc: YouTubeApiError) -> bool:
+    """Use yt-dlp when the Data API cannot see a playlist that exists on the web."""
+    if exc.status == 404:
+        return True
+    reason = (exc.reason or str(exc)).lower()
+    return "cannot be found" in reason or "playlist not found" in reason
+
+
+def _collect_playlist_refs_from_api(
     client: YouTubeDataApiClient,
     playlist_id: str,
 ) -> tuple[str | None, list[PlaylistVideoRef]]:
-    """Return playlist title and deduplicated videos in playlist order."""
     playlist_title = client.get_playlist_title(playlist_id)
     refs: list[PlaylistVideoRef] = []
     seen: set[str] = set()
@@ -112,6 +119,54 @@ def list_playlist_videos(
                 youtube_published_at_utc=_iso_utc(playlist_published),
             )
         )
+    return playlist_title, refs
+
+
+def _collect_playlist_refs_from_ytdlp(playlist_id: str) -> tuple[str | None, list[PlaylistVideoRef]]:
+    """Playlist enumeration via yt-dlp (metadata only, no media download)."""
+    metadata = fetch_playlist_metadata(playlist_id)
+    refs: list[PlaylistVideoRef] = []
+    for position, video in enumerate(metadata.videos, start=1):
+        refs.append(
+            PlaylistVideoRef(
+                video_id=video.video_id,
+                title=video.title,
+                position=position,
+                youtube_published_at_utc=None,
+            )
+        )
+    return metadata.title, refs
+
+
+def list_playlist_videos(
+    client: YouTubeDataApiClient,
+    playlist_id: str,
+) -> tuple[str | None, list[PlaylistVideoRef]]:
+    """
+    Return playlist title and deduplicated videos in playlist order.
+
+    Uses YouTube Data API first. Falls back to yt-dlp when the API returns 404
+    or an empty item list (common briefly after a new playlist is created).
+    """
+    api_error: YouTubeApiError | None = None
+    playlist_title: str | None = None
+    refs: list[PlaylistVideoRef] = []
+    try:
+        playlist_title, refs = _collect_playlist_refs_from_api(client, playlist_id)
+    except YouTubeApiError as exc:
+        api_error = exc
+        if not _should_fallback_to_ytdlp(exc):
+            raise
+
+    if refs:
+        return playlist_title, refs
+
+    ytdlp_title, ytdlp_refs = _collect_playlist_refs_from_ytdlp(playlist_id)
+    if ytdlp_refs:
+        return ytdlp_title or playlist_title, ytdlp_refs
+
+    if api_error is not None:
+        raise api_error
     return playlist_title, refs
 
 

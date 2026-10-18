@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,8 +11,9 @@ from discovery.playlist import (
     list_playlist_videos,
     parse_playlist_input,
 )
-from discovery.youtube_data_api import ApiVideoDetails, YouTubeDataApiClient
+from discovery.youtube_data_api import ApiVideoDetails, YouTubeApiError, YouTubeDataApiClient
 from datetime import datetime, timezone
+from youtube_utils import PlaylistMetadata, VideoMetadata
 
 
 def test_parse_playlist_input_accepts_url_and_id():
@@ -21,6 +22,12 @@ def test_parse_playlist_input_accepts_url_and_id():
         == "PLtest12345"
     )
     assert parse_playlist_input("PLtest12345") == "PLtest12345"
+
+
+def test_parse_playlist_input_preserves_underscore_playlist_id():
+    url = "https://www.youtube.com/playlist?list=PLOkQ3xh7s_rk"
+    assert parse_playlist_input(url) == "PLOkQ3xh7s_rk"
+    assert parse_playlist_input("PLOkQ3xh7s_rk") == "PLOkQ3xh7s_rk"
 
 
 def test_iter_playlist_video_entries_paginates():
@@ -131,3 +138,54 @@ def test_audit_playlist_classifies_archive_gaps():
 def test_parse_playlist_input_rejects_invalid():
     with pytest.raises(ValueError):
         parse_playlist_input("")
+
+
+def test_list_playlist_videos_falls_back_to_ytdlp_on_api_404():
+    client = MagicMock(spec=YouTubeDataApiClient)
+    client.get_playlist_title.side_effect = YouTubeApiError(
+        "YouTube API HTTP 404: cannot be found",
+        status=404,
+        reason="cannot be found",
+    )
+    ytdlp_meta = PlaylistMetadata(
+        playlist_id="PLOkQ3xh7s_rk",
+        title="Evals",
+        url="https://www.youtube.com/playlist?list=PLOkQ3xh7s_rk",
+        videos=[
+            VideoMetadata("vid00000001", "One", "https://youtu.be/vid00000001"),
+            VideoMetadata("vid00000002", "Two", "https://youtu.be/vid00000002"),
+        ],
+    )
+    with patch(
+        "discovery.playlist.fetch_playlist_metadata",
+        return_value=ytdlp_meta,
+    ) as fetch_mock:
+        title, refs = list_playlist_videos(client, "PLOkQ3xh7s_rk")
+    fetch_mock.assert_called_once_with("PLOkQ3xh7s_rk")
+    assert title == "Evals"
+    assert [ref.video_id for ref in refs] == ["vid00000001", "vid00000002"]
+    client.iter_playlist_video_entries.assert_not_called()
+
+
+def test_list_playlist_videos_falls_back_when_api_returns_no_items():
+    client = MagicMock(spec=YouTubeDataApiClient)
+    client.get_playlist_title.return_value = None
+    client.iter_playlist_video_entries.return_value = iter([])
+    video_ids = [f"vid{i:08d}" for i in range(1, 7)]
+    ytdlp_meta = PlaylistMetadata(
+        playlist_id="PLOkQ3xh7s_rk",
+        title="Evals",
+        url="https://www.youtube.com/playlist?list=PLOkQ3xh7s_rk",
+        videos=[
+            VideoMetadata(vid, f"Talk {i}", f"https://youtu.be/{vid}")
+            for i, vid in enumerate(video_ids, start=1)
+        ],
+    )
+    with patch(
+        "discovery.playlist.fetch_playlist_metadata",
+        return_value=ytdlp_meta,
+    ):
+        title, refs = list_playlist_videos(client, "PLOkQ3xh7s_rk")
+    assert title == "Evals"
+    assert len(refs) == 6
+    assert [ref.position for ref in refs] == list(range(1, 7))
