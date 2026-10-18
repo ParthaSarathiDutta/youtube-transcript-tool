@@ -21,6 +21,7 @@ from pipeline.evals_playlist_sync import (
     sync_evals_playlist,
     write_playlist_index_artifacts,
 )
+from pipeline.playlist_catalog import EVALS_PLAYLIST_TARGET
 from transcript_service import TranscriptResult
 
 
@@ -71,8 +72,9 @@ def test_resolve_needs_copy_when_daily_exists_but_not_evals(tmp_path: Path):
     index = {"videos": {video_id: {"transcript_status": "success", "archive_folder": folder}}}
     ref = PlaylistVideoRef(video_id=video_id, title="Talk", position=1)
     entry = resolve_playlist_video_entry(
+        target=EVALS_PLAYLIST_TARGET,
         archive_root=archive_root,
-        evals_dir=evals_dir,
+        dest_dir=evals_dir,
         index=index,
         ref=ref,
         detail=None,
@@ -120,8 +122,8 @@ def test_sync_copies_daily_transcript_into_evals_folder(tmp_path: Path):
     def fail_fetch(_vid: str) -> TranscriptResult:
         raise AssertionError("must not download when daily copy exists")
 
-    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
-        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+    with patch("pipeline.playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
             result = sync_evals_playlist(
                 _config(archive_root),
                 dry_run=False,
@@ -183,8 +185,8 @@ def test_repeated_sync_skips_without_download_or_copy(tmp_path: Path):
         fetch_calls.append(vid)
         return transcript
 
-    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
-        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+    with patch("pipeline.playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
             first = sync_evals_playlist(
                 _config(archive_root),
                 dry_run=False,
@@ -219,8 +221,8 @@ def test_sync_does_not_overwrite_existing_evals_transcript(tmp_path: Path):
     client = MagicMock()
     client.get_videos_details.return_value = {}
 
-    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
-        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+    with patch("pipeline.playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
             result = sync_evals_playlist(
                 _config(archive_root),
                 dry_run=False,
@@ -247,8 +249,8 @@ def test_sync_extracts_new_video_and_points_index_to_evals(tmp_path: Path):
         provider="youtube-api",
     )
 
-    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
-        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+    with patch("pipeline.playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
             result = sync_evals_playlist(
                 _config(archive_root),
                 dry_run=False,
@@ -277,8 +279,8 @@ def test_sync_dry_run_does_not_write_transcripts(tmp_path: Path):
 
     client = MagicMock()
     client.get_videos_details.return_value = {}
-    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
-        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+    with patch("pipeline.playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
             result = sync_evals_playlist(
                 _config(archive_root),
                 dry_run=True,
@@ -297,7 +299,7 @@ def test_markdown_transcript_link_uses_paths_relative_to_index_md(tmp_path: Path
     local.parent.mkdir(parents=True)
     local.write_text("t", encoding="utf-8")
     local_link = markdown_transcript_link(
-        evals_dir=evals_dir,
+        dest_dir=evals_dir,
         archive_root=archive_root,
         transcript_location="responsiv/evals/Talk__vid12345678/transcript.md",
     )
@@ -340,8 +342,8 @@ def test_sync_keeps_missing_youtube_published_at_null(tmp_path: Path):
         display_text="Hello transcript body long enough",
         provider="youtube-api",
     )
-    with patch("pipeline.evals_playlist_sync.YouTubeDataApiClient", return_value=client):
-        with patch("pipeline.evals_playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
+    with patch("pipeline.playlist_sync.YouTubeDataApiClient", return_value=client):
+        with patch("pipeline.playlist_sync.list_playlist_videos", return_value=("Evals", refs)):
             sync_evals_playlist(
                 _config(archive_root),
                 dry_run=False,
@@ -379,6 +381,7 @@ def test_metadata_merge_preserves_transcript_generated_at(tmp_path: Path):
         )
     ]
     write_playlist_index_artifacts(
+        target=EVALS_PLAYLIST_TARGET,
         archive_root=archive_root,
         playlist_id="PLtest",
         playlist_title="Evals",
