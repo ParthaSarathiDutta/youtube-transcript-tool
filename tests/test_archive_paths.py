@@ -62,6 +62,50 @@ def test_migrate_renames_legacy_folder_without_duplicating(tmp_path: Path):
     assert resolve_video_dir(videos_dir, "abc12345678") == videos_dir / folder
 
 
+def test_metadata_collision_merges_fields_and_preserves_conflicts(tmp_path: Path):
+    videos_dir = tmp_path / "videos"
+    title = "Meta Talk"
+    folder_name = build_video_folder_name(title, "meta1234567")
+    target = videos_dir / folder_name
+    target.mkdir(parents=True)
+    (target / "metadata.json").write_text(
+        json.dumps(
+            {
+                "video_id": "meta1234567",
+                "title": "Canonical Title",
+                "provider": "youtube_transcript_api",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (target / "transcript.md").write_text("# T\n\nURL: x\n\nsame", encoding="utf-8")
+    legacy = videos_dir / "meta1234567"
+    legacy.mkdir(parents=True)
+    (legacy / "metadata.json").write_text(
+        json.dumps(
+            {
+                "video_id": "meta1234567",
+                "title": "Legacy Title",
+                "legacy_only": "keep-me",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (legacy / "transcript.md").write_text("# T\n\nURL: x\n\nsame", encoding="utf-8")
+
+    consolidate_video_folders(videos_dir, video_id="meta1234567", title=title)
+    canonical = videos_dir / folder_name
+    merged = json.loads((canonical / "metadata.json").read_text(encoding="utf-8"))
+    assert merged["title"] == "Canonical Title"
+    assert merged["legacy_only"] == "keep-me"
+    assert merged["provider"] == "youtube_transcript_api"
+    conflicts = merged["_metadata_merge_conflicts"]["meta1234567"]
+    assert conflicts["title"]["alternate"] == "Legacy Title"
+    backup = json.loads((canonical / "metadata.from-meta1234567.json").read_text())
+    assert backup["title"] == "Legacy Title"
+    assert len(list_video_dirs(videos_dir, "meta1234567")) == 1
+
+
 def test_collision_merges_unique_summary_before_removing_legacy(tmp_path: Path):
     videos_dir = tmp_path / "videos"
     title = "Duplicate Test"

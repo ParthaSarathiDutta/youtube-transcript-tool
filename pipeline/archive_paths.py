@@ -145,7 +145,7 @@ def merge_video_dir_into(dest: Path, src: Path) -> None:
             continue
         if item.name in PROTECTED_ARTIFACTS:
             if item.name == "metadata.json":
-                _merge_metadata_files(dest_file, item)
+                _merge_metadata_files(dest_file, item, src_folder_name=src.name)
             else:
                 _preserve_protected_conflict(dest, dest_file, src, item)
         else:
@@ -157,20 +157,45 @@ def merge_video_dir_into(dest: Path, src: Path) -> None:
     shutil.rmtree(src)
 
 
-def _merge_metadata_files(dest_file: Path, src_file: Path) -> None:
+def _load_json_dict(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {}
     try:
-        dest_meta = json.loads(dest_file.read_text(encoding="utf-8"))
-        src_meta = json.loads(src_file.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_metadata_files(
+    dest_file: Path,
+    src_file: Path,
+    *,
+    src_folder_name: str,
+) -> None:
+    dest_meta = _load_json_dict(dest_file)
+    src_meta = _load_json_dict(src_file)
+    if not src_meta:
         _preserve_protected_conflict(
             dest_file.parent, dest_file, src_file.parent, src_file
         )
         return
-    if not isinstance(dest_meta, dict):
-        dest_meta = {}
-    if isinstance(src_meta, dict):
-        for key, value in src_meta.items():
-            dest_meta.setdefault(key, value)
+
+    backup_path = dest_file.parent / f"metadata.from-{src_folder_name}.json"
+    conflicts: dict[str, dict[str, object]] = {}
+    for key, src_value in src_meta.items():
+        if key not in dest_meta:
+            dest_meta[key] = src_value
+            continue
+        if dest_meta[key] == src_value:
+            continue
+        conflicts[key] = {"kept": dest_meta[key], "alternate": src_value}
+
+    backup_path.write_text(json.dumps(src_meta, indent=2), encoding="utf-8")
+    if conflicts:
+        merge_conflicts = dest_meta.setdefault("_metadata_merge_conflicts", {})
+        if isinstance(merge_conflicts, dict):
+            merge_conflicts[src_folder_name] = conflicts
     dest_file.write_text(json.dumps(dest_meta, indent=2), encoding="utf-8")
 
 
@@ -192,6 +217,12 @@ def _assert_protected_contents_preserved(dest: Path, src: Path) -> None:
         src_file = src / name
         if not src_file.is_file():
             continue
+        if name == "metadata.json":
+            if _metadata_fields_preserved(dest, src, src_file):
+                continue
+            raise RuntimeError(
+                f"Refusing to remove {src}: metadata.json fields not preserved in {dest}"
+            )
         src_bytes = src_file.read_bytes()
         dest_file = dest / name
         if dest_file.is_file() and dest_file.read_bytes() == src_bytes:
@@ -199,15 +230,35 @@ def _assert_protected_contents_preserved(dest: Path, src: Path) -> None:
         backup = dest / f"{src_file.stem}.from-{src.name}{src_file.suffix}"
         if backup.is_file() and backup.read_bytes() == src_bytes:
             continue
-        if name == "metadata.json" and dest_file.is_file():
-            try:
-                if src_bytes in dest_file.read_bytes():
-                    continue
-            except OSError:
-                pass
         raise RuntimeError(
             f"Refusing to remove {src}: protected file {name} not preserved in {dest}"
         )
+
+
+def _metadata_fields_preserved(dest: Path, src: Path, src_file: Path) -> bool:
+    src_meta = _load_json_dict(src_file)
+    if not src_meta:
+        return True
+    dest_meta = _load_json_dict(dest / "metadata.json")
+    backup_metas = [_load_json_dict(path) for path in dest.glob("metadata.from-*.json")]
+    conflict_blocks = dest_meta.get("_metadata_merge_conflicts")
+    if not isinstance(conflict_blocks, dict):
+        conflict_blocks = {}
+
+    for key, src_value in src_meta.items():
+        if dest_meta.get(key) == src_value:
+            continue
+        if any(backup.get(key) == src_value for backup in backup_metas):
+            continue
+        if any(backup == src_meta for backup in backup_metas):
+            continue
+        src_conflicts = conflict_blocks.get(src.name)
+        if isinstance(src_conflicts, dict):
+            entry = src_conflicts.get(key)
+            if isinstance(entry, dict) and entry.get("alternate") == src_value:
+                continue
+        return False
+    return True
 
 
 def update_day_manifest_video_paths(
